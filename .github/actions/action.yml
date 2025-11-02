@@ -1196,6 +1196,7 @@ runs:
         echo "Threads: $(nproc --all)"
         echo "Optimization: ${{ inputs.optimize_level }}"
         echo "KCFLAGS: ${KCFLAGS:0:150}..."
+        echo "KCPPFLAGS: ${KCPPFLAGS:0:150}..."
         echo "Timestamp: $KBUILD_BUILD_TIMESTAMP"
         echo "Workspace: $WORKSPACE"
         
@@ -1222,12 +1223,8 @@ runs:
         BUILD_START=$(date +%s)
         set -o pipefail
         
-        make -j"$(nproc --all)" \
-          O="$OUT" \
-          KCFLAGS="$KCFLAGS" \
-          KCPPFLAGS="$
-                    KCPPFLAGS="$KCPPFLAGS" \
-          2>&1 | tee build.log
+        # ✅ FIXED: Corrected make command without line break in KCPPFLAGS
+        make -j"$(nproc --all)" O="$OUT" KCFLAGS="$KCFLAGS" KCPPFLAGS="$KCPPFLAGS" 2>&1 | tee build.log
         
         BUILD_END=$(date +%s)
         BUILD_TIME=$((BUILD_END - BUILD_START))
