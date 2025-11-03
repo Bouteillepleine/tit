@@ -29,7 +29,7 @@ This repository provides GitHub Actions workflows to automatically build flashab
 
 🚀 Installation
 Download the latest kernel ZIP for your device from Releases
-Flash the AnyKernel3 ZIP with KErnel Flasher / SukuSU MAnager
+Flash the AnyKernel3 ZIP with Kernel Flasher / SukiSU Manager to enable KPM
 Reboot and enjoy!
 ⚠️ Warning: Always backup your data before flashing custom kernels. Ensure you have a working recovery and know how to restore your device.
 
