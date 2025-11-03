@@ -42,7 +42,7 @@ Build metadata - Detailed build information and logs
 To trigger a build for a specific device, use the GitHub Actions workflow or clone and build manually:
 
 # Clone the repository
-git clone https://github.com/Bouteillepleine/Oneplus-Kernels-SukiSu.git
+git clone https://github.com/Bouteillepleine/SukiSu_Ultra_Oneplus-.git
 cd Oneplus-Kernels-SukiSu
 
 # Follow the workflow scripts for your target device
