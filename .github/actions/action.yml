@@ -167,10 +167,6 @@ runs:
         echo ""
         echo "Disk:"
         df -h / | tail -n1
-        AVAILABLE_GB=$(df / --output=avail -BG | tail -n1 | tr -dc '0-9')
-        if [ "$AVAILABLE_GB" -lt 20 ]; then
-          echo "::warning::Low disk space: ${AVAILABLE_GB}GB available (recommend 20GB+)"
-        fi
         echo ""
         echo "CPU:"
         echo "  Cores: $(nproc --all)"
@@ -354,47 +350,30 @@ runs:
         
         CACHE_DIR="$HOME/.ccache"
         echo "CCACHE_DIR=$CACHE_DIR" >> "$GITHUB_ENV"
-        echo "CCACHE_MAXSIZE=15G" >> "$GITHUB_ENV"
+        echo "CCACHE_MAXSIZE=12G" >> "$GITHUB_ENV"
         
         mkdir -p "$CACHE_DIR"
         
-        # Generate stable cache key based on kernel source hash
-        COMMON_PATH="$GITHUB_WORKSPACE/$CONFIG/kernel_platform/common"
-        if [ -d "$COMMON_PATH" ]; then
-          KERNEL_HASH=$(find "$COMMON_PATH" \( -name "Makefile" -o -name "Kconfig" \) \
-            -type f -exec sha256sum {} + 2>/dev/null | \
-            sha256sum | cut -c1-8 || echo "default")
-        else
-          KERNEL_HASH="default"
-        fi
-        
-        CACHE_KEY_BASE="ccache-v4-${ANDROID_VER:-unk}-${KERNEL_VER:-unk}-${CLANG_VERSION_SHORT:-unk}-${OP_MODEL:-unk}"
-        
-        echo "CACHE_KEY_BASE=${CACHE_KEY_BASE}" >> "$GITHUB_ENV"
-        echo "KERNEL_HASH=${KERNEL_HASH}" >> "$GITHUB_ENV"
-        
         echo "Cache configuration:"
         echo "  Directory: $CACHE_DIR"
-        echo "  Max size: 15G"
-        echo "  Base key: $CACHE_KEY_BASE"
-        echo "  Kernel hash: $KERNEL_HASH"
+        echo "  Max size: 12G"
         echo "  Android: ${ANDROID_VER:-unknown}"
         echo "  Kernel: ${KERNEL_VER:-unknown}"
         echo "  Clang: ${CLANG_VERSION_SHORT:-unknown}"
         echo "  Device: ${OP_MODEL:-unknown}"
         echo "::endgroup::"
     
-    - name: Restore ccache
-      uses: actions/cache/restore@v4
+    - name: Cache ccache
+      uses: actions/cache@v4
       with:
         path: ${{ env.CCACHE_DIR }}
-        key: ${{ env.CACHE_KEY_BASE }}-${{ env.KERNEL_HASH }}
+        key: ccache-v3-${{ env.ANDROID_VER }}-${{ env.KERNEL_VER }}-${{ env.CLANG_VERSION_SHORT }}-${{ env.OP_MODEL }}
         restore-keys: |
-          ${{ env.CACHE_KEY_BASE }}-
-          ccache-v4-${{ env.ANDROID_VER }}-${{ env.KERNEL_VER }}-${{ env.CLANG_VERSION_SHORT }}-
-          ccache-v4-${{ env.ANDROID_VER }}-${{ env.KERNEL_VER }}-
-          ccache-v4-${{ env.ANDROID_VER }}-
-          ccache-v4-
+          ccache-v3-${{ env.ANDROID_VER }}-${{ env.KERNEL_VER }}-${{ env.CLANG_VERSION_SHORT }}-${{ env.OP_MODEL }}-
+          ccache-v3-${{ env.ANDROID_VER }}-${{ env.KERNEL_VER }}-${{ env.CLANG_VERSION_SHORT }}-
+          ccache-v3-${{ env.ANDROID_VER }}-${{ env.KERNEL_VER }}-
+          ccache-v3-${{ env.ANDROID_VER }}-
+          ccache-v3-    
    
     - name: Configure ccache
       shell: bash
@@ -403,92 +382,53 @@ runs:
         echo "::group::Configure ccache for maximum performance"
         
         export CCACHE_DIR="$HOME/.ccache"
-        export CCACHE_MAXSIZE="15G"
+        export CCACHE_MAXSIZE="12G"
         
-        # Initialize ccache
         ccache -M "$CCACHE_MAXSIZE"
         
-        # ===== Performance Settings =====
+        export CCACHE_COMPILERCHECK="content"
+        export CCACHE_BASEDIR="${GITHUB_WORKSPACE}"
+        export CCACHE_NOHASHDIR="true"
         
-        # Compiler check: Use mtime for faster checks
-        ccache -o compiler_check=mtime
-        
-        # Base directory for path normalization
-        ccache -o base_dir="${GITHUB_WORKSPACE}"
-        ccache -o hash_dir=false
-        
-        # Compression: Balance between speed and size (level 1 for speed)
         ccache -o compression=true
-        ccache -o compression_level=1
-        
-        # Direct mode: Skip preprocessor when possible
+        ccache -o compression_level=3
         ccache -o direct_mode=true
+        ccache -o hash_dir=false
+        ccache -o file_clone=true
+        ccache -o inode_cache=true
+        ccache -o umask=002
         
-        # Depend mode: Track dependencies for better cache hits
         if ccache --help 2>&1 | grep -q 'depend_mode'; then
           ccache -o depend_mode=true
         fi
         
-        # File operations optimization
-        ccache -o file_clone=true
-        ccache -o inode_cache=true
+        ccache -o sloppiness=file_macro,time_macros,include_file_mtime,include_file_ctime,pch_defines,system_headers,locale
         
-        # Hardlink duplicates to save space
-        ccache -o hard_link=true
+        export CCACHE_IGNOREOPTIONS="--sysroot*"
         
-        # Increase cache limits
-        ccache -o max_files=0  # Unlimited files
-        ccache -o max_size=15G
-        
-        # Sloppiness settings for better hit rate
-        ccache -o sloppiness=file_macro,time_macros,include_file_mtime,include_file_ctime,pch_defines,system_headers,locale,clang_index_store,modules
-        
-        # Ignore certain options that don't affect output
-        ccache -o ignore_options="--sysroot*:-march=*:-mcpu=*"
-        
-        # Stats logging
-        ccache -o log_file="${CCACHE_DIR}/ccache.log"
-        ccache -o debug=false
-        
-        # Umask for proper permissions
-        ccache -o umask=002
-        
-        # ===== Environment Variables =====
         {
-          echo "CCACHE_COMPILERCHECK=mtime"
+          echo "CCACHE_COMPILERCHECK=content"
           echo "CCACHE_BASEDIR=${GITHUB_WORKSPACE}"
           echo "CCACHE_NOHASHDIR=true"
-          echo "CCACHE_HARDLINK=true"
-          echo "CCACHE_SLOPPINESS=file_macro,time_macros,include_file_mtime,include_file_ctime,pch_defines,system_headers,locale,clang_index_store,modules"
-          echo "CCACHE_IGNOREOPTIONS=--sysroot*:-march=*:-mcpu=*"
-          echo "CCACHE_COMPRESS=true"
-          echo "CCACHE_COMPRESSLEVEL=1"
-          echo "CCACHE_DIRECT=true"
+          echo "CCACHE_IGNOREOPTIONS=$CCACHE_IGNOREOPTIONS"
         } >> "$GITHUB_ENV"
-        
-        if ccache --help 2>&1 | grep -q 'depend_mode'; then
-          echo "CCACHE_DEPEND=true" >> "$GITHUB_ENV"
-        fi
         
         echo "✅ ccache configured for production"
         echo ""
         echo "Configuration applied:"
-        echo "  Max size: 15G"
+        echo "  Max size: 12G (persisted)"
         echo "  Base dir: ${GITHUB_WORKSPACE}"
-        echo "  Compression: zstd level 1 (fast)"
+        echo "  Compression: zstd level 3"
         echo "  Direct mode: enabled"
-        echo "  Depend mode: enabled"
         echo "  File cloning: enabled"
-        echo "  Hard linking: enabled"
         echo "  Inode cache: enabled"
-        echo "  Compiler check: mtime"
         echo ""
         
         if [ -d "$CCACHE_DIR" ] && find "$CCACHE_DIR" -type f -print -quit 2>/dev/null | grep -q .; then
           echo "✅ Restored cache found"
           echo ""
           echo "Pre-build cache statistics:"
-          ccache -s | head -n 25
+          ccache -s | head -n 20
         else
           echo "⚠️ No existing cache - building from scratch"
           echo "Cache will be populated for future builds"
@@ -506,65 +446,8 @@ runs:
         
         echo "CCACHE_DISABLE=1" >> "$GITHUB_ENV"
         
-        echo "✅ ccache disabled for clean build"
+        echo "✅ ccache disabled for clean build (no cache/stat wipe)"
         echo "   Shared cache and statistics preserved for concurrent jobs"
-        echo "::endgroup::"
-
-    - name: Warm ccache (Parallel Header Processing)
-      if: ${{ inputs.clean != 'true' }}
-      shell: bash
-      run: |
-        set -euo pipefail
-        echo "::group::Warm ccache with parallel header compilation"
-        
-        COMMON="$GITHUB_WORKSPACE/$CONFIG/kernel_platform/common"
-        
-        if [ ! -d "$COMMON" ]; then
-          echo "⚠️ Kernel source not yet available, skipping cache warming"
-          echo "::endgroup::"
-          exit 0
-        fi
-        
-        cd "$COMMON"
-        
-        # Check if cache is cold
-        CACHE_SIZE=$(ccache -s 2>/dev/null | grep "^cache size" | awk '{print $3}' | sed 's/[^0-9.]//g' || echo "0")
-        
-        if (( $(echo "$CACHE_SIZE < 100" | bc -l 2>/dev/null || echo "1") )); then
-          echo "Cold cache detected (${CACHE_SIZE}MB) - warming up..."
-          
-          # Create minimal config for header processing
-          if [ ! -f "out/.config" ]; then
-            echo "Creating minimal config for cache warming..."
-            make O=out ARCH=arm64 defconfig 2>&1 | head -n 10 || true
-          fi
-          
-          # Compile kernel infrastructure in parallel
-          echo "Compiling build tools..."
-          make -j"$(nproc)" O=out \
-            scripts/basic/fixdep \
-            scripts/mod/modpost \
-            scripts/genksyms/genksyms \
-            2>&1 | head -n 50 || true
-          
-          # Process common headers in parallel
-          echo "Processing common headers..."
-          if [ -d "include" ]; then
-            find include/ -name "*.h" -type f | head -n 500 | \
-              xargs -P"$(nproc)" -I {} sh -c \
-              'clang -E -Iinclude -Iarch/arm64/include -I. {} -o /dev/null 2>/dev/null || true' &
-            
-            # Don't wait too long
-            sleep 5
-            pkill -P $$ clang 2>/dev/null || true
-          fi
-          
-          NEW_SIZE=$(ccache -s 2>/dev/null | grep "^cache size" | awk '{print $3}' | sed 's/[^0-9.]//g' || echo "0")
-          echo "✅ Cache warmed: ${CACHE_SIZE}MB → ${NEW_SIZE}MB"
-        else
-          echo "✅ Cache already warm (${CACHE_SIZE}MB) - skipping"
-        fi
-        
         echo "::endgroup::"
 
     - name: Clone AnyKernel3
@@ -1207,7 +1090,7 @@ runs:
         PYTHONWARNINGS: "ignore:invalid escape sequence"
       run: |
         set -euo pipefail
-        echo "::group::Build kernel with optimized ccache"
+        echo "::group::Build kernel with ccache optimization"
         
         KERNEL_PATH="$GITHUB_WORKSPACE/$CONFIG/kernel_platform"
         COMMON="$KERNEL_PATH/common"
@@ -1244,7 +1127,7 @@ runs:
         MPMAP="-fmacro-prefix-map=${WORKSPACE}=."
         FPMAP="-ffile-prefix-map=${WORKSPACE}=."
         
-                export KCFLAGS="${KCFLAGS:-} $MAP $MPMAP $FPMAP -no-canonical-prefixes -fdiagnostics-color=never -Qunused-arguments -Wno-unused-command-line-argument"
+        export KCFLAGS="${KCFLAGS:-} $MAP $MPMAP $FPMAP -no-canonical-prefixes -fdiagnostics-color=never -Qunused-arguments -Wno-unused-command-line-argument"
         export KCPPFLAGS="${KCPPFLAGS:-} $MAP $MPMAP $FPMAP"
         
         export CC="clang"
@@ -1277,10 +1160,10 @@ runs:
           clang --version 2>&1 | head -n1 || true
           echo ""
           echo "ccache configuration:"
-          ccache -p | grep -E "(compression|direct_mode|depend|sloppiness|compiler_check|hard_link)" || true
+          ccache -p | grep -E "(compression|direct_mode|readonly_direct|depend|sloppiness)" || true
           echo ""
           echo "ccache pre-build status:"
-          ccache -s | head -n 25
+          ccache -s | head -n 20
         fi
         echo "============================================"
         
@@ -1306,10 +1189,8 @@ runs:
         scripts/config --file "$OUT/.config" -e LTO_CLANG
         make O="$OUT" olddefconfig
         
-        KCFLAGS="$KCFLAGS -Wno-error -pipe -fno-stack-protector ${KCFLAGS_EXTRA} -g0"
+        KCFLAGS="$KCFLAGS -Wno-error -pipe -fno-stack-protector ${KCFLAGS_EXTRA}"
         KCPPFLAGS="$KCPPFLAGS -DCONFIG_OPTIMIZE_INLINING"
-        
-        export LDFLAGS="-Wl,--threads=$(nproc)"
         
         echo "============================================"
         echo "🔧 Build Configuration"
@@ -1328,24 +1209,25 @@ runs:
           echo "  Dir: $CCACHE_DIR"
           echo "  Base: $CCACHE_BASEDIR"
           echo "  Max size: $CCACHE_MAXSIZE"
-          echo "  Compression: zstd level 1 (fast)"
-          echo "  Compiler check: mtime"
-          echo "  Features: direct, depend, file_clone, hard_link, inode_cache"
+          echo "  Compression: zstd level 3"
+          echo "  Features: readonly_direct, file_clone, inode_cache, depend"
         else
           echo "ccache: DISABLED"
         fi
         echo "============================================"
         
+        if [ "${{ inputs.clean }}" != "true" ]; then
+          if [ ! -d "$CCACHE_DIR" ] || [ -z "$(find "$CCACHE_DIR" -type f 2>/dev/null | head -n1)" ]; then
+            echo "🔥 Priming cache with header preprocessing..."
+            make -C "$COMMON" O="$OUT" headers_install prepare 2>&1 | head -n 20 || true
+            echo ""
+          fi
+        fi
+        
         BUILD_START=$(date +%s)
         set -o pipefail
         
-        JOBS=$(nproc --all)
-        LOAD_AVG=$((JOBS * 2))
-        
-        make -j"$JOBS" -l"$LOAD_AVG" O="$OUT" \
-          KCFLAGS="$KCFLAGS" \
-          KCPPFLAGS="$KCPPFLAGS" \
-          2>&1 | tee build.log
+        make -j"$(nproc --all)" O="$OUT" KCFLAGS="$KCFLAGS" KCPPFLAGS="$KCPPFLAGS" 2>&1 | tee build.log
         
         BUILD_END=$(date +%s)
         BUILD_TIME=$((BUILD_END - BUILD_START))
@@ -1357,7 +1239,7 @@ runs:
         IMG="$OUT/arch/arm64/boot/Image"
         if [ ! -f "$IMG" ]; then
           echo "::error::Kernel Image missing"
-          echo "::group::Last 100 lines of build log"
+                    echo "::group::Last 100 lines of build log"
           tail -n 100 build.log || echo "Build log not available"
           echo "::endgroup::"
           exit 1
@@ -1390,12 +1272,8 @@ runs:
         
         export CCACHE_DIR="${{ env.CCACHE_DIR }}"
         
-        echo "## 📊 ccache Detailed Statistics" >> $GITHUB_STEP_SUMMARY
-        echo "" >> $GITHUB_STEP_SUMMARY
-        echo '```' >> $GITHUB_STEP_SUMMARY
-        ccache -s >> $GITHUB_STEP_SUMMARY
-        echo '```' >> $GITHUB_STEP_SUMMARY
-        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "ccache Statistics"
+        ccache -s
         
         STATS="$(ccache -s)"
         
@@ -1414,11 +1292,6 @@ runs:
           print substr($0, RSTART, RLENGTH)
         }' | head -n1)
         
-        MISSES=$(echo "$STATS" | awk '/^[[:space:]]*Misses:/ {
-          match($0, /[0-9]+/); 
-          print substr($0, RSTART, RLENGTH)
-        }' | head -n1)
-        
         if [ "${CACHEABLE:-0}" -gt 0 ]; then
           HIT_RATE=$(awk -v h="${HITS:-0}" -v c="$CACHEABLE" 'BEGIN{printf "%.1f", (h/c)*100}')
           DIRECT_RATE=$(awk -v d="${DIRECT:-0}" -v c="$CACHEABLE" 'BEGIN{printf "%.1f", (d/c)*100}')
@@ -1427,76 +1300,16 @@ runs:
           DIRECT_RATE="0.0"
         fi
         
-        echo "hit_rate=${HIT_RATE}" >> "$GITHUB_OUTPUT"
-        echo "direct_rate=${DIRECT_RATE}" >> "$GITHUB_OUTPUT"
-        
-        echo "### Performance Metrics" >> $GITHUB_STEP_SUMMARY
-        echo "| Metric | Value |" >> $GITHUB_STEP_SUMMARY
-        echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
-        echo "| **Hit Rate** | ${HIT_RATE}% |" >> $GITHUB_STEP_SUMMARY
-        echo "| **Direct Hit Rate** | ${DIRECT_RATE}% |" >> $GITHUB_STEP_SUMMARY
-        echo "| **Total Cacheable** | ${CACHEABLE:-0} |" >> $GITHUB_STEP_SUMMARY
-        echo "| **Cache Hits** | ${HITS:-0} |" >> $GITHUB_STEP_SUMMARY
-        echo "| **Cache Misses** | ${MISSES:-0} |" >> $GITHUB_STEP_SUMMARY
-        echo "" >> $GITHUB_STEP_SUMMARY
-        
-        if (( $(echo "$HIT_RATE < 50" | bc -l 2>/dev/null || echo "0") )); then
-          echo "⚠️ **Low hit rate detected!**" >> $GITHUB_STEP_SUMMARY
-          echo "- Consider increasing CCACHE_MAXSIZE" >> $GITHUB_STEP_SUMMARY
-          echo "- Check if cache keys are too specific" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-        fi
-        
-        if (( $(echo "$DIRECT_RATE < 70" | bc -l 2>/dev/null || echo "0") )) && [ "${HITS:-0}" -gt 0 ]; then
-          echo "⚠️ **Low direct hit rate!**" >> $GITHUB_STEP_SUMMARY
-          echo "- Many preprocessor cache hits (slower)" >> $GITHUB_STEP_SUMMARY
-          echo "- Consider adjusting sloppiness settings" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-        fi
-        
-        CACHE_SIZE=$(echo "$STATS" | grep "^cache size" | awk '{print $3, $4}')
-        MAX_SIZE=$(echo "$STATS" | grep "^max cache size" | awk '{print $4, $5}')
-        
-        echo "### Storage" >> $GITHUB_STEP_SUMMARY
-        echo "- **Current Size:** ${CACHE_SIZE:-unknown}" >> $GITHUB_STEP_SUMMARY
-        echo "- **Max Size:** ${MAX_SIZE:-unknown}" >> $GITHUB_STEP_SUMMARY
-        echo "" >> $GITHUB_STEP_SUMMARY
-        
-        if [ -f "${CCACHE_DIR}/ccache.log" ]; then
-          echo "### Recent Log Entries" >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
-          tail -n 20 "${CCACHE_DIR}/ccache.log" >> $GITHUB_STEP_SUMMARY || true
-          echo '```' >> $GITHUB_STEP_SUMMARY
-        fi
+        echo "hit_rate=${HIT_RATE}%" >> "$GITHUB_OUTPUT"
+        echo "direct_rate=${DIRECT_RATE}%" >> "$GITHUB_OUTPUT"
         
         echo "::endgroup::"
-
-    - name: Cleanup Old Cache Entries
-      if: ${{ success() && inputs.clean != 'true' }}
-      shell: bash
-      run: |
-        set -euo pipefail
-        echo "::group::Cleanup old cache entries"
         
-        export CCACHE_DIR="${{ env.CCACHE_DIR }}"
-        
-        CURRENT_SIZE=$(ccache -s | grep "^cache size" | awk '{print $3}' | sed 's/[^0-9.]//g' || echo "0")
-        MAX_SIZE=15
-        
-        echo "Current cache size: ${CURRENT_SIZE}GB / ${MAX_SIZE}GB"
-        
-        if (( $(echo "$CURRENT_SIZE > ($MAX_SIZE * 0.9)" | bc -l 2>/dev/null || echo "0") )); then
-          echo "⚠️ Cache is >90% full, cleaning up..."
-          
-          ccache -C
-          
-          NEW_SIZE=$(ccache -s | grep "^cache size" | awk '{print $3}' | sed 's/[^0-9.]//g' || echo "0")
-          echo "✅ Cleaned up: ${CURRENT_SIZE}GB → ${NEW_SIZE}GB"
-        else
-          echo "✅ Cache size is healthy"
-        fi
-        
-        echo "::endgroup::"
+        echo "## 📊 ccache Statistics" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo '```' >> $GITHUB_STEP_SUMMARY
+        ccache -s >> $GITHUB_STEP_SUMMARY
+        echo '```' >> $GITHUB_STEP_SUMMARY
 
     - name: Check Disk Space (Post-Build)
       if: always()
@@ -1531,11 +1344,11 @@ runs:
         echo "::endgroup::"
     
     - name: Save ccache
-      if: ${{ success() && inputs.clean != 'true' }}
+      if: success()
       uses: actions/cache/save@v4
       with:
         path: ${{ env.CCACHE_DIR }}
-        key: ${{ env.CACHE_KEY_BASE }}-${{ env.KERNEL_HASH }}-${{ github.run_number }}
+        key: ccache-v3-${{ env.ANDROID_VER }}-${{ env.KERNEL_VER }}-${{ env.CLANG_VERSION_SHORT }}-${{ env.OP_MODEL }}-${{ github.run_id }}
    
     - name: Save Build Metadata
       id: save_metadata
@@ -1905,11 +1718,6 @@ runs:
           echo "- **Build Time:** ${BUILD_MIN}m ${BUILD_SEC}s" >> $GITHUB_STEP_SUMMARY
         fi
         
-        if [ "${{ inputs.clean }}" != "true" ] && [ -n "${{ steps.ccache_stats.outputs.hit_rate }}" ]; then
-          echo "- **ccache Hit Rate:** ${{ steps.ccache_stats.outputs.hit_rate }}%" >> $GITHUB_STEP_SUMMARY
-          echo "- **ccache Direct Rate:** ${{ steps.ccache_stats.outputs.direct_rate }}%" >> $GITHUB_STEP_SUMMARY
-        fi
-        
         if [ -n "${{ steps.collect_stats.outputs.warnings_count }}" ]; then
           echo "- **Warnings:** ${{ steps.collect_stats.outputs.warnings_count }}" >> $GITHUB_STEP_SUMMARY
         fi
@@ -1942,9 +1750,3 @@ runs:
         echo "- Branch: ${OP_BRANCH}" >> $GITHUB_STEP_SUMMARY
         echo "- Manifest: ${OP_MANIFEST}" >> $GITHUB_STEP_SUMMARY
         echo "- KSU Meta: ${{ inputs.ksu_meta }}" >> $GITHUB_STEP_SUMMARY
-        
-        if [ "${{ inputs.clean }}" != "true" ]; then
-          echo "- ccache: Enabled (optimized)" >> $GITHUB_STEP_SUMMARY
-        else
-          echo "- ccache: Disabled (clean build)" >> $GITHUB_STEP_SUMMARY
-        fi
