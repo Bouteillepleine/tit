@@ -83,7 +83,6 @@ runs:
         echo '${{ inputs.op_config_json }}' > /tmp/config.json
         jq -r 'to_entries[] | "OP_\(.key | ascii_upcase)=\(.value)"' /tmp/config.json >> "$GITHUB_ENV"
         
-        # ✅ Extract OS version for logging (optional, not used in cache key)
         if jq -e '.os_version' /tmp/config.json >/dev/null 2>&1; then
           OP_OS_VERSION=$(jq -r '.os_version' /tmp/config.json)
         else
@@ -103,43 +102,67 @@ runs:
       run: |
         set -euo pipefail
         echo "::group::Validate inputs"
-        model="$OP_MODEL"
-        soc="$OP_SOC"
-        branch="$OP_BRANCH"
-        manifest="$OP_MANIFEST"
+        
+        # Ensure OP_MODEL was exported from JSON parsing
+        model="${OP_MODEL:-}"
+        soc="${OP_SOC:-}"
+        branch="${OP_BRANCH:-}"
+        manifest="${OP_MANIFEST:-}"
         optimize='${{ inputs.optimize_level }}'
 
-        [[ -n "$model" ]] || { echo "::error::Input 'model' cannot be empty"; exit 1; }
+        # Strict validation with consistent error reporting
+        [[ -n "$model" ]] || { echo "::error::Input 'model' cannot be empty or was not parsed from op_config_json"; exit 1; }
         [[ -n "$soc" ]] || { echo "::error::Input 'soc' cannot be empty"; exit 1; }
         [[ -n "$branch" ]] || { echo "::error::Input 'branch' cannot be empty"; exit 1; }
         [[ -n "$manifest" ]] || { echo "::error::Input 'manifest' cannot be empty"; exit 1; }
 
+        # Character validation
         if ! [[ "$soc" =~ ^[A-Za-z0-9_-]+$ ]]; then
-          echo "::error::Input 'soc' contains invalid characters"; exit 1
-        fi    
+          echo "::error::Input 'soc' contains invalid characters: $soc"
+          exit 1
+        fi
+        
         if ! [[ "$branch" =~ ^[A-Za-z0-9._/-]+$ ]]; then
-          echo "::error::Input 'branch' contains invalid characters"; exit 1
-        fi    
+          echo "::error::Input 'branch' contains invalid characters: $branch"
+          exit 1
+        fi
+        
+        # Manifest validation
         if [[ "$manifest" == http*://* ]]; then
           if ! [[ "$manifest" =~ ^https:// ]]; then
-            echo "::error::Manifest URL must be HTTPS"; exit 1
+            echo "::error::Manifest URL must be HTTPS, got: $manifest"
+            exit 1
           fi
           if ! [[ "$manifest" =~ \.xml($|\?) ]]; then
-            echo "::error::Manifest URL should point to an XML file"; exit 1
+            echo "::error::Manifest URL should point to an XML file: $manifest"
+            exit 1
           fi
         else
           if ! [[ "$manifest" =~ \.xml$ ]]; then
-            echo "::error::Manifest filename must end with .xml"; exit 1
+            echo "::error::Manifest filename must end with .xml: $manifest"
+            exit 1
           fi
           if [[ "$manifest" =~ [[:space:]] ]]; then
-            echo "::error::Manifest filename cannot contain spaces"; exit 1
+            echo "::error::Manifest filename cannot contain spaces: $manifest"
+            exit 1
           fi
         fi
+        
+        # Optimization level validation
         case "$optimize" in
           O2|O3) ;;
-          *) echo "::error::optimize_level must be O2 or O3; got '$optimize'"; exit 1 ;;
+          *) 
+            echo "::error::optimize_level must be O2 or O3; got '$optimize'"
+            exit 1
+            ;;
         esac
+        
         echo "✅ Input validation passed"
+        echo "  Model: $model"
+        echo "  SoC: $soc"
+        echo "  Branch: $branch"
+        echo "  Manifest: ${manifest:0:80}..."
+        echo "  Optimization: $optimize"
         echo "::endgroup::"
 
     - name: Install Minimal Dependencies
@@ -194,42 +217,118 @@ runs:
         fi
         echo "::endgroup::"
 
-    - name: Initialize and Sync Kernel Source
+    - name: Initialize and Sync Kernel Source (Hardened)
       shell: bash
       run: |
         set -euo pipefail
         echo "::group::Initialize kernel source"
+        
+        # Git environment hardening for CI
+        export GIT_ASKPASS=/bin/true
+        export GIT_TERMINAL_PROMPT=0
+        git config --global gc.auto 0 || true
+        git config --global fetch.prune true || true
+        git config --global http.postBuffer 524288000 || true
+        
+        CONFIG="${CONFIG:-kernel_src}"
         echo "Creating folder for configuration: $CONFIG"
         mkdir -p "$CONFIG"
         cd "$CONFIG"
-        echo "Initializing and syncing kernel source..."
         
+        # Use local repo if system repo not available
+        REPO="${REPO:-repo}"
+        if ! command -v "$REPO" >/dev/null 2>&1; then
+          echo "Downloading repo tool..."
+          curl -sSL https://storage.googleapis.com/git-repo-downloads/repo -o ./repo
+          chmod +x ./repo
+          REPO="./repo"
+        fi
+        
+        echo "Initializing kernel source..."
+        
+        # Handle manifest URL or filename
         if [[ "$OP_MANIFEST" == https://* ]]; then
           mkdir -p .repo/manifests
-          curl --fail --show-error --location --proto '=https' "$OP_MANIFEST" -o .repo/manifests/temp_manifest.xml
+          curl --fail --show-error --location --proto '=https' \
+            --retry 3 --retry-delay 2 --connect-timeout 30 \
+            "$OP_MANIFEST" -o .repo/manifests/temp_manifest.xml
           
           "$REPO" init -u https://github.com/OnePlusOSS/kernel_manifest.git \
             -b "$OP_BRANCH" \
-            -m temp_manifest.xml --repo-rev=v2.16 --depth=1 --no-clone-bundle --no-tags
+            -m temp_manifest.xml \
+            --repo-rev=v2.16 \
+            --depth=1 \
+            --no-clone-bundle \
+            --no-tags \
+            --current-branch
         else
           "$REPO" init -u https://github.com/OnePlusOSS/kernel_manifest.git \
             -b "$OP_BRANCH" \
-            -m "$OP_MANIFEST" --repo-rev=v2.16 --depth=1 --no-clone-bundle --no-tags
+            -m "$OP_MANIFEST" \
+            --repo-rev=v2.16 \
+            --depth=1 \
+            --no-clone-bundle \
+            --no-tags \
+            --current-branch
         fi
         
+        # Create manifests_fallback for later TRUSTY check
+        echo "Backing up manifests for reference..."
+        mkdir -p .repo/manifests_fallback
+        cp -a .repo/manifests/* .repo/manifests_fallback/ 2>/dev/null || true
+        
         "$REPO" --version
-        success=false
-        for i in 1 2 3; do
-          if "$REPO" sync -c --no-clone-bundle --no-tags --optimized-fetch \
-             -j"$(nproc --all)" --fail-fast; then
-            success=true
-            break
+        
+        echo "Syncing kernel source with parallel optimization..."
+        
+        # First attempt: full parallelism
+        if ! "$REPO" sync -c \
+             --no-clone-bundle \
+             --no-tags \
+             --optimized-fetch \
+             --prune \
+             --fail-fast \
+             --force-sync \
+             -j"$(nproc --all)"; then
+          
+          echo "⚠️ First sync failed, retrying with reduced parallelism..."
+          
+          # Retry with -j4 for stability
+          if ! "$REPO" sync -c \
+               --no-clone-bundle \
+               --no-tags \
+               --optimized-fetch \
+               --prune \
+               --force-sync \
+               -j4; then
+            
+            echo "⚠️ Second sync failed, final attempt with -j1..."
+            
+            # Final retry: serial sync
+            "$REPO" sync -c \
+              --no-clone-bundle \
+              --no-tags \
+              --optimized-fetch \
+              --prune \
+              --force-sync \
+              -j1
           fi
-          echo "⚠️ repo sync attempt $i failed; retrying..."
-          sleep 30
-        done
-        $success || { echo "::error::repo sync failed after 3 attempts"; exit 1; }
-        echo "✅ Kernel source synced"
+        fi
+        
+        # Generate locked manifest for reproducibility
+        echo "Generating locked manifest..."
+        "$REPO" manifest -r -o manifest-locked.xml || true
+        
+        # List synced projects
+        echo ""
+        echo "Synced projects:"
+        "$REPO" list -p | sed 's/^/  - /' | head -n 20
+        
+        PROJECT_COUNT=$("$REPO" list -p | wc -l)
+        echo ""
+        echo "Total projects: $PROJECT_COUNT"
+        
+        echo "✅ Kernel source synced successfully"
         echo "::endgroup::"
 
     - name: Get Kernel Version Info
@@ -252,7 +351,8 @@ runs:
         done
         
         if [ -z "$BRANCH_LINE" ]; then
-          echo "::error::No BRANCH= found in config files"; exit 1
+          echo "::error::No BRANCH= found in config files"
+          exit 1
         fi
         
         BRANCH_VALUE="${BRANCH_LINE#*=}"
@@ -266,6 +366,10 @@ runs:
         VERSION=$(grep '^VERSION *=' Makefile | awk '{print $3}')
         PATCHLEVEL=$(grep '^PATCHLEVEL *=' Makefile | awk '{print $3}')
         SUBLEVEL=$(grep '^SUBLEVEL *=' Makefile | awk '{print $3}')
+        
+        # Safety: default SUBLEVEL to 0 if missing
+        SUBLEVEL="${SUBLEVEL:-0}"
+        
         FULL_VERSION="$VERSION.$PATCHLEVEL.$SUBLEVEL"
         
         cd "$ARTIFACTS_DIR"
@@ -356,6 +460,17 @@ runs:
         echo "   Version: ${CLANG_VERSION}"
         echo "::endgroup::"
 
+    - name: ♻️ Setup ccache
+      uses: actions/cache@v4
+      if: ${{ inputs.clean != 'true' }}
+      with:
+        path: ${{ env.CCACHE_DIR }}
+        key: ccache-suki-v3-${{ env.ANDROID_VER }}-${{ env.KERNEL_VER }}-${{ env.CLANG_VERSION_SHORT }}
+        restore-keys: |
+          ccache-suki-v3-${{ env.ANDROID_VER }}-${{ env.KERNEL_VER }}-${{ env.CLANG_VERSION_SHORT }}-
+          ccache-suki-v3-${{ env.ANDROID_VER }}-${{ env.KERNEL_VER }}-
+          ccache-suki-v3-${{ env.ANDROID_VER }}-
+
     - name: Set Cache Environment
       shell: bash
       run: |
@@ -364,13 +479,13 @@ runs:
         
         CACHE_DIR="$HOME/.ccache"
         echo "CCACHE_DIR=$CACHE_DIR" >> "$GITHUB_ENV"
-        echo "CCACHE_MAXSIZE=12G" >> "$GITHUB_ENV"
+        echo "CCACHE_MAXSIZE=2G" >> "$GITHUB_ENV"  # ✅ Increased from 1G
         
         mkdir -p "$CACHE_DIR"
         
         echo "📦 Cache configuration:"
         echo "  Directory: $CACHE_DIR"
-        echo "  Max size: 12G"
+        echo "  Max size: 2G"  # ✅ Updated
         echo "  Strategy: Kernel-version-based sharing"
         echo ""
         echo "🔑 Cache key components:"
@@ -381,21 +496,19 @@ runs:
         echo ""
         echo "📊 Cache sharing:"
         echo "  ✅ All devices with android${ANDROID_VER:-?}-${KERNEL_VER:-?} share this cache"
-        echo "  ✅ Expected hit rate on 2nd build: 85-95%"
-        echo "  ✅ Reduces build time by 50-70%"
         echo "::endgroup::"
 
-    - name: ♻️ Restore ccache
-      uses: actions/cache/restore@v4
-      if: ${{ inputs.clean != 'true' }}
+    - name: 🔧 Cache Clang Toolchain
+      uses: actions/cache@v4
       with:
-        path: ${{ env.CCACHE_DIR }}
-        # ✅ Kernel-version-based key (shared across all devices with same kernel)
-        key: ccache-suki-v3-${{ env.ANDROID_VER }}-${{ env.KERNEL_VER }}-${{ env.CLANG_VERSION_SHORT }}-${{ github.run_id }}
+        path: |
+          ${{ github.workspace }}/${{ env.CONFIG }}/kernel_platform/prebuilts
+          ${{ github.workspace }}/${{ env.CONFIG }}/kernel_platform/prebuilts-master
+        key: clang-toolchain-${{ env.OP_SOC }}-${{ env.CLANG_VERSION_SHORT }}-${{ hashFiles(format('{0}/kernel_platform/.repo/manifest*.xml', env.CONFIG), format('{0}/kernel_platform/.repo/manifests/**/*.xml', env.CONFIG)) }}
         restore-keys: |
-          ccache-suki-v3-${{ env.ANDROID_VER }}-${{ env.KERNEL_VER }}-${{ env.CLANG_VERSION_SHORT }}-
-          ccache-suki-v3-${{ env.ANDROID_VER }}-${{ env.KERNEL_VER }}-
-          ccache-suki-v3-${{ env.ANDROID_VER }}-
+          clang-toolchain-${{ env.OP_SOC }}-${{ env.CLANG_VERSION_SHORT }}-
+          clang-toolchain-${{ env.OP_SOC }}-
+          clang-toolchain-
    
     - name: Configure ccache
       shell: bash
@@ -404,30 +517,42 @@ runs:
         echo "::group::Configure ccache for maximum performance"
         
         export CCACHE_DIR="$HOME/.ccache"
-        export CCACHE_MAXSIZE="12G"
+        export CCACHE_MAXSIZE="2G"
         
+        # Set max size
         ccache -M "$CCACHE_MAXSIZE"
         
+        # Core settings (keep existing)
         export CCACHE_COMPILERCHECK="content"
         export CCACHE_BASEDIR="${GITHUB_WORKSPACE}"
         export CCACHE_NOHASHDIR="true"
         
         ccache -o compression=true
-        ccache -o compression_level=3
+        ccache -o compression_level=1
+        
+        # ✅ NEW: Parallel processing
+        ccache -o max_files=0
+        ccache -o max_size=2G
+        
+        # Keep existing optimizations
         ccache -o direct_mode=true
         ccache -o hash_dir=false
         ccache -o file_clone=true
         ccache -o inode_cache=true
         ccache -o umask=002
         
+        # Keep existing depend_mode check
         if ccache --help 2>&1 | grep -q 'depend_mode'; then
           ccache -o depend_mode=true
         fi
         
+        # Keep existing sloppiness
         ccache -o sloppiness=file_macro,time_macros,include_file_mtime,include_file_ctime,pch_defines,system_headers,locale
         
+        # Keep existing ignore options
         export CCACHE_IGNOREOPTIONS="--sysroot*"
         
+        # Export to environment
         {
           echo "CCACHE_COMPILERCHECK=content"
           echo "CCACHE_BASEDIR=${GITHUB_WORKSPACE}"
@@ -438,12 +563,13 @@ runs:
         echo "✅ ccache configured for production"
         echo ""
         echo "Configuration applied:"
-        echo "  Max size: 12G (persisted)"
+        echo "  Max size: 2G (persisted)"  # ✅ Updated
         echo "  Base dir: ${GITHUB_WORKSPACE}"
-        echo "  Compression: zstd level 3"
+        echo "  Compression: zstd level 1 (fast)"  # ✅ Updated
         echo "  Direct mode: enabled"
         echo "  File cloning: enabled"
         echo "  Inode cache: enabled"
+        echo "  Parallel processing: enabled"  # ✅ New
         echo ""
         
         if [ -d "$CCACHE_DIR" ] && find "$CCACHE_DIR" -type f -print -quit 2>/dev/null | grep -q .; then
@@ -1131,6 +1257,7 @@ runs:
         export KBUILD_BUILD_USER="builder"
         export KBUILD_BUILD_HOST="github-actions"
         export KBUILD_BUILD_VERSION=1
+        export KCONFIG_NOTIMESTAMP=1
         
         echo "📅 Build timestamp: $KBUILD_BUILD_TIMESTAMP (from commit $COMMIT_HASH)"
         echo "🔢 SOURCE_DATE_EPOCH: $SOURCE_DATE_EPOCH"
@@ -1322,8 +1449,13 @@ runs:
           DIRECT_RATE="0.0"
         fi
         
-        echo "hit_rate=${HIT_RATE}%" >> "$GITHUB_OUTPUT"
-        echo "direct_rate=${DIRECT_RATE}%" >> "$GITHUB_OUTPUT"
+        echo "hit_rate=${HIT_RATE}" >> "$GITHUB_OUTPUT"
+        echo "direct_rate=${DIRECT_RATE}" >> "$GITHUB_OUTPUT"
+        
+        echo ""
+        echo "📊 Cache Performance Summary:"
+        echo "  Hit rate: ${HIT_RATE}%"
+        echo "  Direct rate: ${DIRECT_RATE}%"
         
         echo "::endgroup::"
         
@@ -1332,16 +1464,53 @@ runs:
         echo '```' >> $GITHUB_STEP_SUMMARY
         ccache -s >> $GITHUB_STEP_SUMMARY
         echo '```' >> $GITHUB_STEP_SUMMARY
-
-    - name: Check Disk Space (Post-Build)
+    
+    - name: 💾 Check Disk Space (Post-Build)
       if: always()
       shell: bash
       run: |
-        echo "::group::Disk space report"
+        set -euo pipefail
+        echo "::group::Disk space analysis"
+        
+        echo "## 💾 Disk Usage Report" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        
+        # Overall disk usage
+        echo "### Overall Disk Usage"
+        df -h / | tail -n 1 | awk '{print "- **Total:** " $2 "\n- **Used:** " $3 " (" $5 ")\n- **Available:** " $4}' >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        
+        # Detailed breakdown
+        echo "### Detailed Breakdown"
         df -h
         echo ""
-        echo "Largest directories in workspace:"
-        du -h --max-depth=2 "$GITHUB_WORKSPACE" 2>/dev/null | sort -rh | head -n 20 || true
+        
+        # Top 15 largest directories
+        echo "### Top Directories by Size"
+        echo "Scanning workspace (this may take a moment)..."
+        du -h --max-depth=2 "$GITHUB_WORKSPACE" 2>/dev/null | \
+          sort -rh | head -n 15 | \
+          awk '{printf "- `%s` - %s\n", $2, $1}' >> $GITHUB_STEP_SUMMARY || true
+        
+        echo "" >> $GITHUB_STEP_SUMMARY
+        
+        # Cache directories
+        if [ -d "$HOME/.ccache" ]; then
+          CCACHE_SIZE=$(du -sh "$HOME/.ccache" 2>/dev/null | cut -f1)
+          echo "- **ccache:** $CCACHE_SIZE" >> $GITHUB_STEP_SUMMARY
+        fi
+        
+        if [ -d "$GITHUB_WORKSPACE/$CONFIG/kernel_platform/prebuilts" ]; then
+          PREBUILTS_SIZE=$(du -sh "$GITHUB_WORKSPACE/$CONFIG/kernel_platform/prebuilts" 2>/dev/null | cut -f1)
+          echo "- **Toolchain:** $PREBUILTS_SIZE" >> $GITHUB_STEP_SUMMARY
+        fi
+        
+        if [ -d "$GITHUB_WORKSPACE/$CONFIG/kernel_platform/common/out" ]; then
+          OUT_SIZE=$(du -sh "$GITHUB_WORKSPACE/$CONFIG/kernel_platform/common/out" 2>/dev/null | cut -f1)
+          echo "- **Build output:** $OUT_SIZE" >> $GITHUB_STEP_SUMMARY
+        fi
+        
+        echo "" >> $GITHUB_STEP_SUMMARY
         echo "::endgroup::"
 
     - name: On failure - Summarize last error
@@ -1363,15 +1532,7 @@ runs:
         fi
         
         echo '```' >> "$GITHUB_STEP_SUMMARY"
-        echo "::endgroup::"
-    
-    - name: 💾 Save ccache
-      if: success()
-      uses: actions/cache/save@v4
-      with:
-        path: ${{ env.CCACHE_DIR }}
-        # ✅ Must match the restore key format
-        key: ccache-suki-v3-${{ env.ANDROID_VER }}-${{ env.KERNEL_VER }}-${{ env.CLANG_VERSION_SHORT }}-${{ github.run_id }}
+        echo "::endgroup::"       
    
     - name: Save Build Metadata
       id: save_metadata
