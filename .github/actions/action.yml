@@ -103,20 +103,17 @@ runs:
         set -euo pipefail
         echo "::group::Validate inputs"
         
-        # Ensure OP_MODEL was exported from JSON parsing
         model="${OP_MODEL:-}"
         soc="${OP_SOC:-}"
         branch="${OP_BRANCH:-}"
         manifest="${OP_MANIFEST:-}"
         optimize='${{ inputs.optimize_level }}'
 
-        # Strict validation with consistent error reporting
         [[ -n "$model" ]] || { echo "::error::Input 'model' cannot be empty or was not parsed from op_config_json"; exit 1; }
         [[ -n "$soc" ]] || { echo "::error::Input 'soc' cannot be empty"; exit 1; }
         [[ -n "$branch" ]] || { echo "::error::Input 'branch' cannot be empty"; exit 1; }
         [[ -n "$manifest" ]] || { echo "::error::Input 'manifest' cannot be empty"; exit 1; }
 
-        # Character validation
         if ! [[ "$soc" =~ ^[A-Za-z0-9_-]+$ ]]; then
           echo "::error::Input 'soc' contains invalid characters: $soc"
           exit 1
@@ -127,7 +124,6 @@ runs:
           exit 1
         fi
         
-        # Manifest validation
         if [[ "$manifest" == http*://* ]]; then
           if ! [[ "$manifest" =~ ^https:// ]]; then
             echo "::error::Manifest URL must be HTTPS, got: $manifest"
@@ -148,7 +144,6 @@ runs:
           fi
         fi
         
-        # Optimization level validation
         case "$optimize" in
           O2|O3) ;;
           *) 
@@ -223,25 +218,16 @@ runs:
         set -euo pipefail
         echo "::group::Initialize kernel source"
         
-        # ========================================================================
-        # CONFIGURATION
-        # ========================================================================
         echo "📋 Configuration:"
         echo "  Model: $CONFIG"
         echo "  Branch: $OP_BRANCH"
         echo "  Manifest: $OP_MANIFEST"
         echo ""
         
-        # ========================================================================
-        # WORKSPACE SETUP
-        # ========================================================================
         echo "📁 Creating workspace: $CONFIG"
         mkdir -p "$CONFIG"
         cd "$CONFIG"
         
-        # ========================================================================
-        # MANIFEST HANDLING
-        # ========================================================================
         echo "🔧 Initializing repo..."
         
         if [[ "$OP_MANIFEST" == https://* ]]; then
@@ -250,7 +236,6 @@ runs:
           
           mkdir -p .repo/manifests
           
-          # Download with timeout protection
           if ! curl --fail --show-error --location --proto '=https' \
                --connect-timeout 30 --max-time 300 \
                "$OP_MANIFEST" -o .repo/manifests/temp_manifest.xml; then
@@ -260,7 +245,6 @@ runs:
           
           MANIFEST_FILE="temp_manifest.xml"
           
-          # Validation (non-fatal unless XML invalid)
           SIZE=$(stat -c%s .repo/manifests/temp_manifest.xml 2>/dev/null || echo 0)
           echo "  Downloaded: ${SIZE} bytes"
           
@@ -281,9 +265,6 @@ runs:
           MANIFEST_FILE="$OP_MANIFEST"
         fi
         
-        # ========================================================================
-        # REPO INIT WITH RETRY
-        # ========================================================================
         echo ""
         echo "🔧 Running repo init..."
         
@@ -316,13 +297,11 @@ runs:
           echo "::error::Branch: $OP_BRANCH"
           echo "::error::Manifest: $MANIFEST_FILE"
           
-          # Show helpful debug info
           if [[ "$OP_MANIFEST" != https://* ]]; then
             echo ""
             echo "::group::Available manifests in branch"
             echo "Check: https://github.com/OnePlusOSS/kernel_manifest/tree/${OP_BRANCH}"
             
-            # Try to list available manifests
             if command -v jq >/dev/null 2>&1; then
               curl -s "https://api.github.com/repos/OnePlusOSS/kernel_manifest/contents?ref=${OP_BRANCH}" 2>/dev/null \
                 | jq -r '.[] | select(.name | endswith(".xml")) | "  - \(.name)"' \
@@ -336,13 +315,9 @@ runs:
           exit 1
         fi
         
-        # Show repo version
         echo ""
         "$REPO" --version
         
-        # ========================================================================
-        # SYNC ENVIRONMENT TUNING
-        # ========================================================================
         echo ""
         echo "⚙️  Configuring sync..."
         
@@ -355,9 +330,6 @@ runs:
         echo "  Parallel jobs: $SYNC_JOBS"
         echo "  Stall protection: ${GIT_HTTP_LOW_SPEED_LIMIT} bytes/s for ${GIT_HTTP_LOW_SPEED_TIME}s"
         
-        # ========================================================================
-        # KERNEL SOURCE SYNC WITH RETRY
-        # ========================================================================
         echo ""
         echo "📥 Syncing kernel source..."
         
@@ -392,16 +364,12 @@ runs:
         SYNC_END=$(date +%s)
         SYNC_DURATION=$((SYNC_END - SYNC_START))
         
-        # ========================================================================
-        # RESULT HANDLING
-        # ========================================================================
         if [ "$success" = false ]; then
           echo ""
           echo "::error::❌ repo sync failed after 3 attempts"
           echo "::error::Time spent: ${SYNC_DURATION}s"
           echo "::error::Configuration: $CONFIG"
           
-          # Show partial sync state
           if [ -d .repo ]; then
             echo ""
             echo "::group::Partial sync state"
@@ -412,17 +380,12 @@ runs:
           exit 1
         fi
         
-        # ========================================================================
-        # SUCCESS SUMMARY
-        # ========================================================================
         echo ""
         echo "✅ Kernel source synced successfully"
         
-        # Duration formatting (cross-platform)
         HUMAN_DUR="$(date -u -d @${SYNC_DURATION} +%M:%S 2>/dev/null || echo "${SYNC_DURATION}s")"
         echo "  Duration: ${SYNC_DURATION}s (${HUMAN_DUR})"
         
-        # Sync statistics
         if [ -d .repo ]; then
           PROJECT_COUNT=$("$REPO" list 2>/dev/null | wc -l)
           REPO_SIZE=$(du -sh .repo 2>/dev/null | cut -f1 || echo "unknown")
@@ -433,9 +396,6 @@ runs:
           echo "  Total: $TOTAL_SIZE"
         fi
         
-        # ========================================================================
-        # STRUCTURE VERIFICATION
-        # ========================================================================
         echo ""
         echo "🔍 Verifying structure..."
         
@@ -455,7 +415,6 @@ runs:
           echo "  ✅ All expected directories present"
         fi
         
-        # Show key directories
         echo ""
         echo "📂 Key directories:"
         for dir in kernel common prebuilts build; do
@@ -504,7 +463,6 @@ runs:
         PATCHLEVEL=$(grep '^PATCHLEVEL *=' Makefile | awk '{print $3}')
         SUBLEVEL=$(grep '^SUBLEVEL *=' Makefile | awk '{print $3}')
         
-        # Safety: default SUBLEVEL to 0 if missing
         SUBLEVEL="${SUBLEVEL:-0}"
         
         FULL_VERSION="$VERSION.$PATCHLEVEL.$SUBLEVEL"
@@ -597,16 +555,59 @@ runs:
         echo "   Version: ${CLANG_VERSION}"
         echo "::endgroup::"
 
-    - name: ♻️ Setup ccache
-      uses: actions/cache@v4
-      if: ${{ inputs.clean != 'true' }}
-      with:
-        path: ${{ env.CCACHE_DIR }}
-        key: ccache-suki-v3-${{ env.ANDROID_VER }}-${{ env.KERNEL_VER }}-${{ env.CLANG_VERSION_SHORT }}
-        restore-keys: |
-          ccache-suki-v3-${{ env.ANDROID_VER }}-${{ env.KERNEL_VER }}-${{ env.CLANG_VERSION_SHORT }}-
-          ccache-suki-v3-${{ env.ANDROID_VER }}-${{ env.KERNEL_VER }}-
-          ccache-suki-v3-${{ env.ANDROID_VER }}-
+    - name: 🔍 Validate Cache Key Components
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "::group::Validate cache configuration"
+        
+        echo "Checking cache key components..."
+        
+        VALIDATION_FAILED=false
+        
+        # Check ANDROID_VER
+        if [ -z "${ANDROID_VER:-}" ] || [ "${ANDROID_VER}" = "unknown" ]; then
+          echo "❌ ANDROID_VER is invalid: '${ANDROID_VER:-<empty>}'"
+          VALIDATION_FAILED=true
+        else
+          echo "✅ ANDROID_VER: ${ANDROID_VER}"
+        fi
+        
+        # Check KERNEL_VER
+        if [ -z "${KERNEL_VER:-}" ] || [ "${KERNEL_VER}" = "unknown" ]; then
+          echo "❌ KERNEL_VER is invalid: '${KERNEL_VER:-<empty>}'"
+          VALIDATION_FAILED=true
+        else
+          echo "✅ KERNEL_VER: ${KERNEL_VER}"
+        fi
+        
+        # Check CLANG_VERSION_SHORT
+        if [ -z "${CLANG_VERSION_SHORT:-}" ] || [ "${CLANG_VERSION_SHORT}" = "unknown" ]; then
+          echo "❌ CLANG_VERSION_SHORT is invalid: '${CLANG_VERSION_SHORT:-<empty>}'"
+          VALIDATION_FAILED=true
+        else
+          echo "✅ CLANG_VERSION_SHORT: ${CLANG_VERSION_SHORT}"
+        fi
+        
+        echo ""
+        
+        if [ "$VALIDATION_FAILED" = "true" ]; then
+          echo "⚠️ Cache key validation failed"
+          echo "   Cache will be disabled for this build to prevent pollution"
+          echo "   This usually indicates a version detection issue"
+          echo ""
+          echo "::warning::Cache disabled due to invalid key components"
+        else
+          CACHE_KEY="ccache-suki-v3-${ANDROID_VER}-${KERNEL_VER}-${CLANG_VERSION_SHORT}"
+          echo "✅ Cache key validation passed"
+          echo "   Key: $CACHE_KEY"
+          echo ""
+          echo "📊 Cache sharing scope:"
+          echo "   All devices with android${ANDROID_VER}-${KERNEL_VER} + clang-${CLANG_VERSION_SHORT}"
+          echo "   will share this cache for maximum efficiency"
+        fi
+        
+        echo "::endgroup::"
 
     - name: Set Cache Environment
       shell: bash
@@ -616,32 +617,134 @@ runs:
         
         CACHE_DIR="$HOME/.ccache"
         echo "CCACHE_DIR=$CACHE_DIR" >> "$GITHUB_ENV"
-        echo "CCACHE_MAXSIZE=2G" >> "$GITHUB_ENV"  # 
+        echo "CCACHE_MAXSIZE=2G" >> "$GITHUB_ENV"
         
         mkdir -p "$CACHE_DIR"
         
+        # Export safe versions to prevent empty cache keys
+        ANDROID_VER_SAFE="${ANDROID_VER:-unknown}"
+        KERNEL_VER_SAFE="${KERNEL_VER:-unknown}"
+        CLANG_VER_SAFE="${CLANG_VERSION_SHORT:-unknown}"
+        
+        # Ensure env vars are set for cache keys (idempotent)
+        echo "ANDROID_VER=${ANDROID_VER_SAFE}" >> "$GITHUB_ENV"
+        echo "KERNEL_VER=${KERNEL_VER_SAFE}" >> "$GITHUB_ENV"
+        echo "CLANG_VERSION_SHORT=${CLANG_VER_SAFE}" >> "$GITHUB_ENV"
+        
         echo "📦 Cache configuration:"
         echo "  Directory: $CACHE_DIR"
-        echo "  Max size: 2G"  # ✅ Updated
+        echo "  Max size: 2G"
         echo "  Strategy: Kernel-version-based sharing"
         echo ""
         echo "🔑 Cache key components:"
-        echo "  Android: ${ANDROID_VER:-unknown}"
-        echo "  Kernel: ${KERNEL_VER:-unknown}"
-        echo "  Clang: ${CLANG_VERSION_SHORT:-unknown}"
+        echo "  Android: $ANDROID_VER_SAFE"
+        echo "  Kernel: $KERNEL_VER_SAFE"
+        echo "  Clang: $CLANG_VER_SAFE"
         echo "  Device: ${OP_MODEL:-unknown} (for logging only)"
+        echo "::endgroup::"
+
+    - name: Ensure ccache is available
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "::group::Check ccache availability"
+        
+        if ! command -v ccache >/dev/null 2>&1; then
+          echo "⚠️ ccache not found; attempting install..."
+          
+          if command -v apt-get >/dev/null 2>&1; then
+            echo "Installing ccache via apt-get..."
+            sudo apt-get update -qq
+            sudo apt-get install -y ccache
+            
+            if command -v ccache >/dev/null 2>&1; then
+              echo "✅ ccache installed successfully"
+            else
+              echo "::error::Failed to install ccache"
+              exit 1
+            fi
+          else
+            echo "::error::ccache not installed and no apt-get available"
+            exit 1
+          fi
+        else
+          echo "✅ ccache already available"
+        fi
+        
         echo ""
-        echo "📊 Cache sharing:"
-        echo "  ✅ All devices with android${ANDROID_VER:-?}-${KERNEL_VER:-?} share this cache"
+        echo "ccache version:"
+        ccache --version
+        
+        echo "::endgroup::"
+
+    - name: ♻️ Restore ccache
+      id: cache_restore
+      uses: actions/cache@v4
+      if: |
+        inputs.clean != 'true' && 
+        env.ANDROID_VER != 'unknown' && 
+        env.KERNEL_VER != 'unknown' && 
+        env.CLANG_VERSION_SHORT != 'unknown' &&
+        env.ANDROID_VER != '' &&
+        env.KERNEL_VER != '' &&
+        env.CLANG_VERSION_SHORT != ''
+      with:
+        enableCrossOsArchive: false
+        path: ${{ env.CCACHE_DIR }}
+        key: ccache-suki-v3-${{ env.ANDROID_VER }}-${{ env.KERNEL_VER }}-${{ env.CLANG_VERSION_SHORT }}
+        restore-keys: |
+          ccache-suki-v3-${{ env.ANDROID_VER }}-${{ env.KERNEL_VER }}-
+          ccache-suki-v3-${{ env.ANDROID_VER }}-
+
+    - name: 📊 Cache Status
+      if: ${{ inputs.clean != 'true' }}
+      shell: bash
+      run: |
+        echo "::group::Cache restore status"
+        
+        # Validate cache key components
+        KEY_VALID=true
+        for var in ANDROID_VER KERNEL_VER CLANG_VERSION_SHORT; do
+          val="${!var:-}"
+          if [ -z "$val" ] || [ "$val" = "unknown" ]; then
+            echo "⚠️ Invalid cache key component: $var='$val'"
+            KEY_VALID=false
+          fi
+        done
+        
+        if [ "$KEY_VALID" = "false" ]; then
+          echo ""
+          echo "❌ Cache restore skipped due to invalid key components"
+          echo "   This is expected on first run or if version detection failed"
+          echo "::endgroup::"
+          exit 0
+        fi
+        
+        # Report cache hit status
+        if [ "${{ steps.cache_restore.outputs.cache-hit }}" = "true" ]; then
+          echo "✅ Cache hit: Exact match found"
+          echo "   Key: ccache-suki-v3-${ANDROID_VER}-${KERNEL_VER}-${CLANG_VERSION_SHORT}"
+        elif [ -n "${{ steps.cache_restore.outputs.cache-matched-key }}" ]; then
+          echo "⚡ Cache restored from partial match"
+          echo "   Matched: ${{ steps.cache_restore.outputs.cache-matched-key }}"
+          echo "   Target:  ccache-suki-v3-${ANDROID_VER}-${KERNEL_VER}-${CLANG_VERSION_SHORT}"
+        else
+          echo "❄️ Cache miss: Building from scratch"
+          echo "   Key: ccache-suki-v3-${ANDROID_VER}-${KERNEL_VER}-${CLANG_VERSION_SHORT}"
+          echo "   Cache will be populated for future builds"
+        fi
+        
         echo "::endgroup::"
 
     - name: 🔧 Cache Clang Toolchain
+      id: cache_toolchain
       uses: actions/cache@v4
       with:
+        enableCrossOsArchive: false
         path: |
           ${{ github.workspace }}/${{ env.CONFIG }}/kernel_platform/prebuilts
           ${{ github.workspace }}/${{ env.CONFIG }}/kernel_platform/prebuilts-master
-        key: clang-toolchain-${{ env.OP_SOC }}-${{ env.CLANG_VERSION_SHORT }}-${{ hashFiles(format('{0}/kernel_platform/.repo/manifest*.xml', env.CONFIG), format('{0}/kernel_platform/.repo/manifests/**/*.xml', env.CONFIG)) }}
+        key: clang-toolchain-${{ env.OP_SOC }}-${{ env.CLANG_VERSION_SHORT }}-${{ hashFiles(format('{0}/kernel_platform/.repo/**/manifest*.xml', env.CONFIG)) }}
         restore-keys: |
           clang-toolchain-${{ env.OP_SOC }}-${{ env.CLANG_VERSION_SHORT }}-
           clang-toolchain-${{ env.OP_SOC }}-
@@ -656,40 +759,29 @@ runs:
         export CCACHE_DIR="$HOME/.ccache"
         export CCACHE_MAXSIZE="2G"
         
-        # Set max size
-        ccache -M "$CCACHE_MAXSIZE"
+        ccache -M "$CCACHE_MAXSIZE" >/dev/null 2>&1
         
-        # Core settings (keep existing)
         export CCACHE_COMPILERCHECK="content"
         export CCACHE_BASEDIR="${GITHUB_WORKSPACE}"
         export CCACHE_NOHASHDIR="true"
         
-        ccache -o compression=true
-        ccache -o compression_level=1
+        ccache -o compression=true >/dev/null 2>&1
+        ccache -o compression_level=1 >/dev/null 2>&1
+        ccache -o max_files=0 >/dev/null 2>&1
+        ccache -o direct_mode=true >/dev/null 2>&1
+        ccache -o hash_dir=false >/dev/null 2>&1
+        ccache -o file_clone=true >/dev/null 2>&1
+        ccache -o inode_cache=true >/dev/null 2>&1
+        ccache -o umask=002 >/dev/null 2>&1
         
-        # ✅ NEW: Parallel processing
-        ccache -o max_files=0
-        ccache -o max_size=2G
-        
-        # Keep existing optimizations
-        ccache -o direct_mode=true
-        ccache -o hash_dir=false
-        ccache -o file_clone=true
-        ccache -o inode_cache=true
-        ccache -o umask=002
-        
-        # Keep existing depend_mode check
         if ccache --help 2>&1 | grep -q 'depend_mode'; then
-          ccache -o depend_mode=true
+          ccache -o depend_mode=true >/dev/null 2>&1
         fi
         
-        # Keep existing sloppiness
-        ccache -o sloppiness=file_macro,time_macros,include_file_mtime,include_file_ctime,pch_defines,system_headers,locale
+        ccache -o sloppiness=file_macro,time_macros,include_file_mtime,include_file_ctime,pch_defines,system_headers,locale >/dev/null 2>&1
         
-        # Keep existing ignore options
         export CCACHE_IGNOREOPTIONS="--sysroot*"
         
-        # Export to environment
         {
           echo "CCACHE_COMPILERCHECK=content"
           echo "CCACHE_BASEDIR=${GITHUB_WORKSPACE}"
@@ -699,24 +791,17 @@ runs:
         
         echo "✅ ccache configured for production"
         echo ""
-        echo "Configuration applied:"
-        echo "  Max size: 2G (persisted)"  # ✅ Updated
-        echo "  Base dir: ${GITHUB_WORKSPACE}"
-        echo "  Compression: zstd level 1 (fast)"  # ✅ Updated
-        echo "  Direct mode: enabled"
-        echo "  File cloning: enabled"
-        echo "  Inode cache: enabled"
-        echo "  Parallel processing: enabled"  # ✅ New
-        echo ""
         
         if [ -d "$CCACHE_DIR" ] && find "$CCACHE_DIR" -type f -print -quit 2>/dev/null | grep -q .; then
           echo "✅ Restored cache found"
           echo ""
-          echo "Pre-build cache statistics:"
-          ccache -s | head -n 20
+          echo "Pre-build statistics:"
+          
+          # ✅ FIX D: More resilient stats grep
+          ccache -s | grep -Ei "(cache hit|cache miss|cache size|files in cache|evicted|cleanups|cacheable)" | head -n 20 || ccache -s | head -n 20
         else
           echo "⚠️ No existing cache - building from scratch"
-          echo "Cache will be populated for future builds"
+          echo "   Cache will be populated for future builds"
         fi
         
         echo "::endgroup::"
@@ -1446,7 +1531,7 @@ runs:
           clang --version 2>&1 | head -n1 || true
           echo ""
           echo "ccache configuration:"
-          ccache -p | grep -E "(compression|direct_mode|readonly_direct|depend|sloppiness)" || true
+          ccache -p | grep -E "(compression|direct_mode|depend|sloppiness)" || true
           echo ""
           echo "ccache pre-build status:"
           ccache -s | head -n 20
@@ -1490,13 +1575,14 @@ runs:
         echo "Timestamp: $KBUILD_BUILD_TIMESTAMP"
         echo "Workspace: $WORKSPACE"
         
+        # ✅ FIX C: Align ccache log with actual configuration
         if [ "${{ inputs.clean }}" != "true" ]; then
           echo "ccache: ENABLED"
-                    echo "  Dir: $CCACHE_DIR"
+          echo "  Dir: $CCACHE_DIR"
           echo "  Base: $CCACHE_BASEDIR"
           echo "  Max size: $CCACHE_MAXSIZE"
-          echo "  Compression: zstd level 3"
-          echo "  Features: readonly_direct, file_clone, inode_cache, depend"
+          echo "  Compression: zstd level 1"
+          echo "  Features: file_clone, inode_cache, depend"
         else
           echo "ccache: DISABLED"
         fi
@@ -1563,24 +1649,53 @@ runs:
         
         STATS="$(ccache -s)"
         
+        # 🔍 Multi-version compatible parsing
+        # Try modern format first, fall back to legacy labels
+        
+        # Attempt 1: Modern "Cacheable calls:" format
         CACHEABLE=$(echo "$STATS" | awk '/Cacheable calls:/ {
           match($0, /[0-9]+/); 
           print substr($0, RSTART, RLENGTH)
         }' | head -n1)
         
+        # Fallback: Legacy "cache hit" counting
+        if [ -z "$CACHEABLE" ] || [ "$CACHEABLE" = "0" ]; then
+          TOTAL_HITS=$(echo "$STATS" | grep -i "cache hit" | grep -oE '[0-9]+' | head -n1 || echo "0")
+          TOTAL_MISS=$(echo "$STATS" | grep -i "cache miss" | grep -oE '[0-9]+' | head -n1 || echo "0")
+          CACHEABLE=$((TOTAL_HITS + TOTAL_MISS))
+        fi
+        
+        # Attempt 1: Modern "Hits:" format
         HITS=$(echo "$STATS" | awk '/^[[:space:]]*Hits:/ {
           match($0, /[0-9]+/); 
           print substr($0, RSTART, RLENGTH)
         }' | head -n1)
         
+        # Fallback: Legacy "cache hit" total
+        if [ -z "$HITS" ]; then
+          HITS=$(echo "$STATS" | grep -iE "cache hit|hits" | grep -oE '[0-9]+' | head -n1 || echo "0")
+        fi
+        
+        # Attempt 1: Modern "Direct:" format
         DIRECT=$(echo "$STATS" | awk '/Direct:/ {
           match($0, /[0-9]+/); 
           print substr($0, RSTART, RLENGTH)
         }' | head -n1)
         
-        if [ "${CACHEABLE:-0}" -gt 0 ]; then
-          HIT_RATE=$(awk -v h="${HITS:-0}" -v c="$CACHEABLE" 'BEGIN{printf "%.1f", (h/c)*100}')
-          DIRECT_RATE=$(awk -v d="${DIRECT:-0}" -v c="$CACHEABLE" 'BEGIN{printf "%.1f", (d/c)*100}')
+        # Fallback: Legacy "cache hit (direct)" format
+        if [ -z "$DIRECT" ]; then
+          DIRECT=$(echo "$STATS" | grep -i "direct" | grep -oE '[0-9]+' | head -n1 || echo "0")
+        fi
+        
+        # 🛡️ Safety: Ensure numeric values
+        CACHEABLE="${CACHEABLE:-0}"
+        HITS="${HITS:-0}"
+        DIRECT="${DIRECT:-0}"
+        
+        # Calculate rates with division-by-zero protection
+        if [ "$CACHEABLE" -gt 0 ]; then
+          HIT_RATE=$(awk -v h="$HITS" -v c="$CACHEABLE" 'BEGIN{printf "%.1f", (h/c)*100}')
+          DIRECT_RATE=$(awk -v d="$DIRECT" -v c="$CACHEABLE" 'BEGIN{printf "%.1f", (d/c)*100}')
         else
           HIT_RATE="0.0"
           DIRECT_RATE="0.0"
@@ -1591,8 +1706,24 @@ runs:
         
         echo ""
         echo "📊 Cache Performance Summary:"
+        echo "  Cacheable calls: $CACHEABLE"
+        echo "  Total hits: $HITS"
+        echo "  Direct hits: $DIRECT"
         echo "  Hit rate: ${HIT_RATE}%"
         echo "  Direct rate: ${DIRECT_RATE}%"
+        
+        # 🎯 Performance classification
+        if (( $(echo "$HIT_RATE > 80" | bc -l 2>/dev/null || echo 0) )); then
+          echo "  Status: 🔥 Excellent cache efficiency"
+        elif (( $(echo "$HIT_RATE > 50" | bc -l 2>/dev/null || echo 0) )); then
+          echo "  Status: ✅ Good cache performance"
+        elif (( $(echo "$HIT_RATE > 20" | bc -l 2>/dev/null || echo 0) )); then
+          echo "  Status: ⚡ Moderate cache usage"
+        elif [ "$CACHEABLE" -gt 0 ]; then
+          echo "  Status: ❄️ Cold cache (first build)"
+        else
+          echo "  Status: ⚠️ No cacheable operations detected"
+        fi
         
         echo "::endgroup::"
         
@@ -1601,6 +1732,11 @@ runs:
         echo '```' >> $GITHUB_STEP_SUMMARY
         ccache -s >> $GITHUB_STEP_SUMMARY
         echo '```' >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**Parsed Metrics:**" >> $GITHUB_STEP_SUMMARY
+        echo "- Cacheable: $CACHEABLE" >> $GITHUB_STEP_SUMMARY
+        echo "- Hits: $HITS (${HIT_RATE}%)" >> $GITHUB_STEP_SUMMARY
+        echo "- Direct: $DIRECT (${DIRECT_RATE}%)" >> $GITHUB_STEP_SUMMARY
     
     - name: 💾 Check Disk Space (Post-Build)
       if: always()
@@ -1612,17 +1748,14 @@ runs:
         echo "## 💾 Disk Usage Report" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
         
-        # Overall disk usage
         echo "### Overall Disk Usage"
         df -h / | tail -n 1 | awk '{print "- **Total:** " $2 "\n- **Used:** " $3 " (" $5 ")\n- **Available:** " $4}' >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
         
-        # Detailed breakdown
         echo "### Detailed Breakdown"
         df -h
         echo ""
         
-        # Top 15 largest directories
         echo "### Top Directories by Size"
         echo "Scanning workspace (this may take a moment)..."
         du -h --max-depth=2 "$GITHUB_WORKSPACE" 2>/dev/null | \
@@ -1631,7 +1764,6 @@ runs:
         
         echo "" >> $GITHUB_STEP_SUMMARY
         
-        # Cache directories
         if [ -d "$HOME/.ccache" ]; then
           CCACHE_SIZE=$(du -sh "$HOME/.ccache" 2>/dev/null | cut -f1)
           echo "- **ccache:** $CCACHE_SIZE" >> $GITHUB_STEP_SUMMARY
@@ -2061,6 +2193,36 @@ runs:
           else
             echo "- ⚠️ **Status:** Not found (may be built-in)" >> $GITHUB_STEP_SUMMARY
           fi
+          echo "" >> $GITHUB_STEP_SUMMARY
+        fi
+
+        if [ "${{ inputs.clean }}" != "true" ]; then
+          echo "### 🚀 Cache Performance" >> $GITHUB_STEP_SUMMARY
+          
+          if [ -n "${{ steps.ccache_stats.outputs.hit_rate }}" ]; then
+            HIT_RATE="${{ steps.ccache_stats.outputs.hit_rate }}"
+            DIRECT_RATE="${{ steps.ccache_stats.outputs.direct_rate }}"
+            
+            echo "- **Hit Rate:** ${HIT_RATE}%" >> $GITHUB_STEP_SUMMARY
+            echo "- **Direct Rate:** ${DIRECT_RATE}%" >> $GITHUB_STEP_SUMMARY
+            
+            if (( $(echo "$HIT_RATE > 80" | bc -l) )); then
+              echo "- **Status:** 🔥 Excellent" >> $GITHUB_STEP_SUMMARY
+            elif (( $(echo "$HIT_RATE > 50" | bc -l) )); then
+              echo "- **Status:** ✅ Good" >> $GITHUB_STEP_SUMMARY
+            elif (( $(echo "$HIT_RATE > 20" | bc -l) )); then
+              echo "- **Status:** ⚡ Fair" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "- **Status:** ❄️ Cold cache" >> $GITHUB_STEP_SUMMARY
+            fi
+            
+            if [ "${{ steps.cache_toolchain.outputs.cache-hit }}" = "true" ]; then
+              echo "- **Toolchain:** ✅ Cached" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "- **Toolchain:** 📥 Downloaded" >> $GITHUB_STEP_SUMMARY
+            fi
+          fi
+          
           echo "" >> $GITHUB_STEP_SUMMARY
         fi
         
