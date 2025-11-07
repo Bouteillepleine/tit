@@ -372,20 +372,20 @@ runs:
         mkdir -p "$CACHE_DIR"
                 
         export CCACHE_DIR="$CACHE_DIR"
-        export CCACHE_MAXSIZE=1G
+        export CCACHE_MAXSIZE=500M  
             
         # Persist to GITHUB_ENV
         echo "CCACHE_DIR=$CACHE_DIR" >> "$GITHUB_ENV"
-        echo "CCACHE_MAXSIZE=1G" >> "$GITHUB_ENV"
+        echo "CCACHE_MAXSIZE=500M" >> "$GITHUB_ENV"   
             
         echo "Cache configuration:"
         echo "  Directory: $CACHE_DIR"
-        echo "  Max size: 1G"
+        echo "  Max size: 500M"  # 
         echo "  Kernel: ${ANDROID_VER:-unknown}-${KERNEL_VER:-unknown}"
         echo "  Devices sharing this cache: All ${ANDROID_VER:-unknown}-${KERNEL_VER:-unknown} devices"
         echo "  Clang: ${CLANG_VERSION_SHORT:-unknown}"
         echo "  Device: ${OP_MODEL:-unknown} (for logging only)"
-        echo "::endgroup::"        
+        echo "::endgroup::"       
 
     - name: ♻️ Setup ccache
       uses: actions/cache@v4
@@ -412,7 +412,7 @@ runs:
         echo ""
         
         # Set max size
-        ccache --max-size=1G
+        ccache --max-size=500M
         
         # Zero stats when not a clean build
         if [ "${{ inputs.clean }}" != "true" ]; then
