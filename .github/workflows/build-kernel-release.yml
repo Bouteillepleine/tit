@@ -314,14 +314,26 @@ jobs:
           echo "✅ Temporary files removed"
           echo ""
           
-          # Show ccache stats (don't clear it!)
+          # Show ccache stats (don't clear it!) - FIXED VERSION
           if command -v ccache >/dev/null 2>&1; then
             echo "📊 ccache statistics after build:"
-            ccache -s | grep -E 'cache size|files in cache|cache hit rate'
             
-            CCACHE_SIZE=$(ccache -s | grep 'cache size' | awk '{print $3, $4}')
-            echo ""
-            echo "💾 ccache preserved (${CCACHE_SIZE}) for next build"
+            # Get full stats output
+            STATS=$(ccache -s 2>/dev/null || true)
+            
+            if [ -n "$STATS" ]; then
+              # Try to extract key metrics (gracefully handle missing lines)
+              echo "$STATS" | grep -i 'cache size' || true
+              echo "$STATS" | grep -i 'files in cache' || true
+              echo "$STATS" | grep -i 'cache hit rate' || true
+              
+              # Get cache size for preservation message
+              CCACHE_SIZE=$(echo "$STATS" | grep -i 'cache size' | awk '{print $3, $4}' || echo "unknown")
+              echo ""
+              echo "💾 ccache preserved (${CCACHE_SIZE}) for next build"
+            else
+              echo "⚠️ Could not retrieve ccache statistics"
+            fi
           fi
           
           echo ""
