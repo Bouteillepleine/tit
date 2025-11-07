@@ -367,13 +367,10 @@ runs:
       uses: actions/cache@v4
       with:
         path: ${{ env.CCACHE_DIR }}
-        key: ccache-v3-${{ env.ANDROID_VER }}-${{ env.KERNEL_VER }}-${{ env.CLANG_VERSION_SHORT }}-${{ env.OP_MODEL }}
+        key: ccache-suki-v3-${{ env.OP_MODEL }}-${{ env.OP_OS_VERSION }}-${{ env.KERNEL_FULL_VER }}-${{ env.CLANG_VERSION_SHORT }}
         restore-keys: |
-          ccache-v3-${{ env.ANDROID_VER }}-${{ env.KERNEL_VER }}-${{ env.CLANG_VERSION_SHORT }}-${{ env.OP_MODEL }}-
-          ccache-v3-${{ env.ANDROID_VER }}-${{ env.KERNEL_VER }}-${{ env.CLANG_VERSION_SHORT }}-
-          ccache-v3-${{ env.ANDROID_VER }}-${{ env.KERNEL_VER }}-
-          ccache-v3-${{ env.ANDROID_VER }}-
-          ccache-v3-    
+          ccache-suki-v3-${{ env.OP_MODEL }}-${{ env.OP_OS_VERSION }}-${{ env.KERNEL_FULL_VER }}-
+          ccache-suki-v3-${{ env.OP_MODEL }}-${{ env.OP_OS_VERSION }}-    
    
     - name: Configure ccache
       shell: bash
@@ -382,7 +379,7 @@ runs:
         echo "::group::Configure ccache for maximum performance"
         
         export CCACHE_DIR="$HOME/.ccache"
-        export CCACHE_MAXSIZE="12G"
+        export CCACHE_MAXSIZE="500M"
         
         ccache -M "$CCACHE_MAXSIZE"
         
