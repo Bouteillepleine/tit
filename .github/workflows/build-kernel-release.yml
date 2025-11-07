@@ -2,7 +2,7 @@ name: Build OnePlus Kernels_SukiSu Ultra
 
 permissions:
   contents: write
-  actions: write
+  actions: read
 
 on:
   workflow_dispatch:
@@ -91,14 +91,23 @@ jobs:
       - name: 🔍 Generate build matrix
         id: matrix
         run: |
+          set -euo pipefail  # ✅ Strict error handling
           echo "::group::Matrix generation"
           
           [ ! -d configs ] && { echo "::error::configs/ not found"; exit 1; }
           
+          # Build matrix with strict JSON validation
           echo "[" > matrix.json
           first=true
           for f in configs/*.json; do
-            jq empty "$f" 2>/dev/null || continue
+            [ ! -f "$f" ] && continue
+            
+            # ✅ Hard fail on invalid JSON (removed warning fallback)
+            if ! jq empty "$f" 2>/dev/null; then
+              echo "::error::Invalid JSON in $f"
+              exit 1
+            fi
+            
             [ "$first" = false ] && echo "," >> matrix.json
             jq -c '.' "$f" >> matrix.json
             first=false
@@ -108,6 +117,7 @@ jobs:
           input="${{ inputs.op_model }}"
           echo "📋 Filter: $input"
           
+          # Build filter expression
           if [[ "$input" == "ALL" ]]; then
             filter="."
           elif [[ "$input" == android*-* ]]; then
@@ -118,15 +128,16 @@ jobs:
             filter="map(select(.model==\"$input\"))"
           fi
           
-          result=$(jq -c "$filter" matrix.json)
+          # ✅ A) Deterministic matrix order - sort by model before filtering
+          result=$(jq -c '[.[] | .] | sort_by(.model) | '"$filter" matrix.json)
           count=$(jq 'length' <<<"$result")
           
-          [ "$count" -eq 0 ] && { echo "::error::No matching devices"; exit 1; }
+          [ "$count" -eq 0 ] && { echo "::error::No matching devices for: $input"; exit 1; }
           
-          echo "✅ Found $count device(s) to build"
+          echo "✅ Found $count device(s) to build (deterministic order)"
           echo ""
-          echo "Devices:"
-          jq -r '.[] | "  - \(.model) (\(.android_version)-\(.kernel_version))"' <<<"$result"
+          echo "Build order:"
+          jq -r '.[] | "  \(.model) (\(.android_version)-\(.kernel_version))"' <<<"$result" | nl -w2 -s'. '
           
           echo "result=$(jq -cn --argjson i "$result" '{include:$i}')" >> $GITHUB_OUTPUT
           echo "count=$count" >> $GITHUB_OUTPUT
@@ -139,7 +150,7 @@ jobs:
           ## 🎯 Build Plan
           
           **Target:** \`${{ inputs.op_model }}\`  
-          **Devices:** ${{ steps.matrix.outputs.count }}  
+          **Devices:** ${{ steps.matrix.outputs.count }} (alphabetically ordered)  
           **Configuration:**
           - Hook: \`${{ inputs.hook }}\`
           - Optimization: \`${{ inputs.optimize_level }}\`
@@ -148,7 +159,13 @@ jobs:
           - Fengchi: ${{ inputs.sched }}
           - Clean Build: ${{ inputs.clean_build }}
           - Create Release: ${{ inputs.make_release }}
+          
+          ### 📋 Build Queue
           EOF
+          
+          echo '${{ needs.setup.outputs.matrix }}' | \
+            jq -r '.include[] | "- `\(.model)` - Android \(.android_version) / Kernel \(.kernel_version)"' \
+            >> $GITHUB_STEP_SUMMARY
 
   build:
     needs: setup
@@ -159,6 +176,48 @@ jobs:
     steps:
       - name: 📥 Checkout repository
         uses: actions/checkout@v4
+
+      - name: 🧹 Free Up Disk Space
+        run: |
+          set -euo pipefail
+          echo "::group::Disk cleanup"
+          
+          echo "Before cleanup:"
+          df -h / | awk 'NR==2 {printf "Used: %s / %s (%s)\n", $3, $2, $5}'
+          
+          # Remove unnecessary software
+          echo "Removing unnecessary packages..."
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /opt/hostedtoolcache/CodeQL
+          
+          # ✅ B) Enhanced apt cleanup
+          sudo apt-get clean
+          sudo apt-get autoremove -y  # ✅ Reclaim more space
+          
+          # Docker cleanup
+          echo "Cleaning Docker..."
+          docker system prune -af 2>/dev/null || true
+          sudo systemctl stop docker 2>/dev/null || true
+          
+          # User caches
+          echo "Cleaning user caches..."
+          rm -rf ~/.cache ~/.npm ~/.local/share/Trash 2>/dev/null || true
+          
+          echo ""
+          echo "After cleanup:"
+          df -h / | awk 'NR==2 {printf "Used: %s / %s (%s)\n", $3, $2, $5}'
+          
+          AVAIL_GB=$(df -BG / | awk 'NR==2 {print $4}' | sed 's/G//')
+          echo "✅ Available space: ${AVAIL_GB}GB"
+          
+          if [ "$AVAIL_GB" -lt 30 ]; then
+            echo "::error::Insufficient disk space: ${AVAIL_GB}GB (need 30GB+)"
+            exit 1
+          fi
+          
+          echo "::endgroup::"
 
       - name: 🔨 Build ${{ matrix.model }}
         id: build
@@ -177,7 +236,17 @@ jobs:
       - name: 📊 Build statistics
         if: always()
         run: |
+          set -euo pipefail
           echo "::group::Build Statistics"
+          
+          # Format size once
+          if command -v numfmt >/dev/null 2>&1 && [ -n "${{ steps.build.outputs.zip_size }}" ]; then
+            SIZE_HUMAN=$(numfmt --to=iec-i --suffix=B "${{ steps.build.outputs.zip_size }}" 2>/dev/null || echo "${{ steps.build.outputs.zip_size }} bytes")
+          else
+            SIZE_HUMAN="${{ steps.build.outputs.zip_size }} bytes"
+          fi
+          
+          echo "SIZE_HUMAN=$SIZE_HUMAN" >> $GITHUB_ENV
           
           echo "Device: ${{ matrix.model }}"
           echo "Status: ${{ job.status }}"
@@ -192,7 +261,7 @@ jobs:
             echo "  - SUSFS: ${{ steps.build.outputs.susfs_version }}"
             echo "  - Build time: ${{ steps.build.outputs.build_time }}s"
             echo "  - ZIP: ${{ steps.build.outputs.zip_name }}"
-            echo "  - Size: $(numfmt --to=iec-i --suffix=B ${{ steps.build.outputs.zip_size }} 2>/dev/null || echo '${{ steps.build.outputs.zip_size }} bytes')"
+            echo "  - Size: $SIZE_HUMAN"
             
             if [ "${{ inputs.clean_build }}" != "true" ]; then
               echo "  - ccache hit rate: ${{ steps.build.outputs.ccache_hit_rate }}"
@@ -214,6 +283,8 @@ jobs:
           name: ${{ matrix.model }}-kernel
           path: ${{ matrix.model }}/artifacts/${{ steps.build.outputs.zip_name }}
           retention-days: 30
+          compression-level: 9
+          if-no-files-found: error  # ✅ C) Strict artifact upload
 
       - name: 📝 Job summary
         if: always()
@@ -232,7 +303,7 @@ jobs:
           | **SukiSU** | v${{ steps.build.outputs.sukisu_version }} |
           | **SUSFS** | ${{ steps.build.outputs.susfs_version }} |
           | **Build Time** | ${{ steps.build.outputs.build_time }}s |
-          | **ZIP Size** | $(numfmt --to=iec-i --suffix=B ${{ steps.build.outputs.zip_size }} 2>/dev/null || echo '${{ steps.build.outputs.zip_size }} bytes') |
+          | **ZIP Size** | ${{ env.SIZE_HUMAN }} |
           EOF
             
             if [ "${{ inputs.clean_build }}" != "true" ]; then
@@ -265,6 +336,7 @@ jobs:
       - name: 🏷️ Generate release tag
         id: tag
         run: |
+          set -euo pipefail
           echo "::group::Tag generation"
           
           git fetch --tags
@@ -284,23 +356,34 @@ jobs:
           
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git tag -a "$tag" -m "Release $tag"
+          git tag -a "$tag" -m "Release $tag - $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
           git push origin "$tag"
           
-          echo "✅ Tag created and pushed"
+          echo "✅ Tag created and pushed: $tag"
           echo "::endgroup::"
 
-      - name: 📥 Download all artifacts
+      - name: 📥 Download kernel artifacts
         uses: actions/download-artifact@v4
         with:
           path: artifacts
+          pattern: '*-kernel'
+          merge-multiple: true
 
       - name: 📦 Prepare release assets
         id: prepare
         run: |
+          set -euo pipefail
           echo "::group::Prepare release"
           
-          mkdir release
+          mkdir -p release
+          
+          # Validate artifacts exist
+          if [ ! -d "artifacts" ] || [ -z "$(ls -A artifacts/*.zip 2>/dev/null)" ]; then
+            echo "::error::No kernel artifacts found"
+            exit 1
+          fi
+          
+          # Copy ZIPs
           find artifacts -name "*.zip" -exec cp {} release/ \;
           
           count=$(ls -1 release/*.zip 2>/dev/null | wc -l)
@@ -312,24 +395,37 @@ jobs:
           echo "count=$count" >> $GITHUB_OUTPUT
           echo "total_size=$total_size" >> $GITHUB_OUTPUT
           
-          cat > notes.md << 'EOF'
-          # 🚀 SukiSU Ultra with SUSFS v1.5.12
+          # Extract SUSFS version from first artifact
+          FIRST_ZIP=$(ls release/*.zip | head -1)
+          SUSFS_VER="v1.5.12"  # Default
           
-          ## 📱 Built Devices
+          if unzip -p "$FIRST_ZIP" "*.txt" 2>/dev/null | grep -q "SUSFS"; then
+            SUSFS_VER=$(unzip -p "$FIRST_ZIP" "*.txt" 2>/dev/null | grep -oP 'SUSFS: \Kv[0-9.]+' | head -1 || echo "v1.5.12")
+          fi
+          
+          echo "susfs_version=$SUSFS_VER" >> $GITHUB_OUTPUT
+          
+          cat > notes.md << EOF
+          # 🚀 SukiSU Ultra with SUSFS $SUSFS_VER
+          
+          ## 📱 Built Devices ($count kernels)
           EOF
           
-          for zip in release/*.zip; do
+          # Sort devices alphabetically in release notes
+          for zip in $(ls release/*.zip | sort); do
             name=$(basename "$zip" .zip)
             size=$(stat -c%s "$zip")
             size_mb=$(echo "scale=2; $size / 1024 / 1024" | bc)
-            echo "- \`$name\` (${size_mb} MB)" >> notes.md
+            sha256=$(sha256sum "$zip" | cut -d' ' -f1)
+            echo "- **\`$name\`** (${size_mb} MB)" >> notes.md
+            echo "  - SHA256: \`${sha256:0:16}...\`" >> notes.md
           done
           
           cat >> notes.md << 'EOF'
           
           ## ✨ Features
           - ⚡ **SukiSU Ultra Manager** - Advanced root management
-          - 🛡️ **SUSFS v1.5.12** - Enhanced security and hiding
+          - 🛡️ **SUSFS** - Enhanced security and hiding
           - 🌐 **WireGuard** - Built-in VPN support
           - 💾 **ZRAM** - Memory compression (optional)
           - 🔧 **BBG LSM** - Baseband Guard security (optional)
@@ -349,6 +445,7 @@ jobs:
           - **Built on:** $(date -u '+%Y-%m-%d %H:%M:%S UTC')
           - **Workflow:** ${{ github.workflow }}
           - **Run:** [#${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+          - **Configuration:** Hook=${{ github.event.inputs.hook }}, Optimization=${{ github.event.inputs.optimize_level }}
           EOF
           
           echo "::endgroup::"
@@ -356,13 +453,27 @@ jobs:
       - name: 🚀 Create GitHub release
         id: release
         run: |
+          set -euo pipefail
           echo "::group::Create release"
           
-          gh release create "$TAG" \
+          # Final validation
+          if [ ! -d "release" ] || [ -z "$(ls -A release/*.zip 2>/dev/null)" ]; then
+            echo "::error::No ZIP files found in release/"
+            exit 1
+          fi
+          
+          ASSET_COUNT=$(ls -1 release/*.zip | wc -l)
+          echo "📦 Uploading $ASSET_COUNT asset(s)..."
+          
+          # Create release
+          if ! gh release create "$TAG" \
             --title "🎯 OnePlus Kernels - SukiSU Ultra $TAG" \
             --notes-file notes.md \
             --prerelease \
-            release/*.zip
+            release/*.zip; then
+            echo "::error::Failed to create release"
+            exit 1
+          fi
           
           echo "✅ Release created: $TAG"
           echo "🔗 URL: ${{ github.server_url }}/${{ github.repository }}/releases/tag/$TAG"
@@ -379,24 +490,43 @@ jobs:
           ## 🎉 Release Created Successfully
           
           **Tag:** [\`${{ steps.tag.outputs.tag }}\`](${{ github.server_url }}/${{ github.repository }}/releases/tag/${{ steps.tag.outputs.tag }})  
+          **SUSFS Version:** ${{ steps.prepare.outputs.susfs_version }}  
           **Kernels:** ${{ steps.prepare.outputs.count }}  
           **Total Size:** $(numfmt --to=iec-i --suffix=B ${{ steps.prepare.outputs.total_size }})
           
-          ### 📦 Assets
+          ### 📦 Assets (alphabetically sorted)
           EOF
           
-          for zip in release/*.zip; do
+          for zip in $(ls release/*.zip | sort); do
             name=$(basename "$zip")
             size=$(stat -c%s "$zip")
             size_mb=$(echo "scale=2; $size / 1024 / 1024" | bc)
             echo "- \`$name\` (${size_mb} MB)" >> $GITHUB_STEP_SUMMARY
           done
 
-      - name: 🧹 Cleanup on failure
-        if: failure()
+      - name: 🧹 Cleanup on failure or cancellation
+        if: failure() || cancelled()  # ✅ D) Handle cancelled workflows
         run: |
-          echo "::group::Cleanup failed release"
-          git push origin --delete "$TAG" 2>/dev/null || true
-          git tag -d "$TAG" 2>/dev/null || true
+          set +e  # Don't fail on cleanup errors
+          echo "::group::Cleanup failed/cancelled release"
+          
+          # Delete remote tag
+          if git ls-remote --tags origin | grep -q "$TAG"; then
+            echo "Deleting remote tag: $TAG"
+            git push origin --delete "$TAG" 2>/dev/null || echo "Failed to delete remote tag"
+          fi
+          
+          # Delete local tag
+          if git tag -l | grep -q "^$TAG$"; then
+            echo "Deleting local tag: $TAG"
+            git tag -d "$TAG" 2>/dev/null || echo "Failed to delete local tag"
+          fi
+          
+          # Try to delete release if it was created
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Deleting release: $TAG"
+            gh release delete "$TAG" --yes 2>/dev/null || echo "Failed to delete release"
+          fi
+          
           echo "✅ Cleanup completed"
           echo "::endgroup::"
