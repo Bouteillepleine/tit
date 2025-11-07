@@ -1919,16 +1919,15 @@ runs:
         echo "   - Installation tools (busybox, magiskboot)"
         echo "::endgroup::"
 
-    - name: Upload Artifacts
+    - name: 📤 Upload kernel artifact
+      if: success()
       uses: actions/upload-artifact@v4
       with:
-        name: ${{ env.OP_MODEL }}-kernel
-        path: |
-          ${{ env.CONFIG }}/artifacts/*.zip
-          ${{ env.CONFIG }}/artifacts/*.txt
-        if-no-files-found: error
+        name: ${{ matrix.model }}-${{ env.ANDROID_VER }}-${{ env.KERNEL_VER }}-kernel
+        path: ${{ matrix.model }}/artifacts/${{ steps.build.outputs.zip_name }}
         retention-days: 30
-        compression-level: 0
+        if-no-files-found: error
+        compression-level: 0  # ZIP is already compressed
 
     - name: Upload ZRAM Module
       if: ${{ inputs.enable_zram == 'true' && steps.zram_find.outputs.upload == 'true' }}
