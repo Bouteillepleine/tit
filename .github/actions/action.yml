@@ -131,8 +131,7 @@ runs:
           O2|O3) ;;
           *) echo "::error::optimize_level must be O2 or O3; got '$optimize'"; exit 1 ;;
         esac
-        
-        # ✅ FIX: Export CONFIG immediately after validation
+                
         echo "CONFIG=$model" >> "$GITHUB_ENV"
         
         echo "✅ Input validation passed"
@@ -151,8 +150,7 @@ runs:
         sudo apt-get clean
         echo "✅ Dependencies installed"
         echo "::endgroup::"
-
-    # ✅ FIX: Aggressive disk cleanup EARLY
+    
     - name: Free Disk Space Early
       shell: bash
       run: |
@@ -340,8 +338,7 @@ runs:
         echo "CLANG_VERSION=$CLANG_VERSION" >> "$GITHUB_ENV"
         echo "✅ Detected Clang: $CLANG_VERSION"
         echo "::endgroup::"
-
-    # ✅ FIX: Robust Clang version extraction with normalization
+   
     - name: Derive Clang Short Version
       shell: bash
       run: |
@@ -428,8 +425,7 @@ runs:
         echo "   Version: ${CLANG_VERSION}"
         echo "   Fingerprint: ${CLANG_VERSION_SHORT}"
         echo "::endgroup::"
-
-    # ✅ FIX: Unified cache environment with 3G cap
+   
     - name: Set Cache Environment
       shell: bash
       run: |
@@ -454,21 +450,9 @@ runs:
         echo "  Android: ${ANDROID_VER:-unknown}"
         echo "  Kernel: ${KERNEL_VER:-unknown}"
         echo "  Clang: ${CLANG_VERSION_SHORT:-unknown}"
-        echo "::endgroup::"
-    
-    # ✅ FIX: V4 cache with normalized keys (cross-device sharing)
-    - name: Restore ccache
-      id: ccache_restore
-      uses: actions/cache@v4
-      with:
-        path: ${{ env.CCACHE_DIR }}
-        key: ccache-suki-v4-${{ runner.os }}-${{ env.ANDROID_VER }}-${{ env.KERNEL_VER }}-${{ env.CLANG_VERSION_SHORT }}
-        restore-keys: |
-          ccache-suki-v4-${{ runner.os }}-${{ env.ANDROID_VER }}-${{ env.KERNEL_VER }}-
-          ccache-suki-v4-${{ runner.os }}-${{ env.ANDROID_VER }}-
-          ccache-suki-v4-${{ runner.os }}-
+        echo "  Model: ${OP_MODEL:-unknown}"
+        echo "::endgroup::"   
    
-    # ✅ FIX: Production-optimized ccache configuration
     - name: Configure ccache
       shell: bash
       run: |
@@ -490,7 +474,7 @@ runs:
         ccache -o inode_cache=true || true
         ccache -o umask=002
         
-        # Enable depend mode if available (Clang 10+)
+        # Enable depend mode if available
         if ccache --help 2>&1 | grep -q 'depend_mode'; then
           ccache -o depend_mode=true
         fi
@@ -509,8 +493,6 @@ runs:
         echo "  Compression: zstd level 3"
         echo "  Direct mode: enabled"
         echo "  Depend mode: $(ccache --help 2>&1 | grep -q 'depend_mode' && echo 'enabled' || echo 'not available')"
-        echo "  File cloning: enabled"
-        echo "  Inode cache: enabled"
         echo ""
         
         if [ -d "$CCACHE_DIR" ] && find "$CCACHE_DIR" -type f -print -quit 2>/dev/null | grep -q .; then
@@ -521,6 +503,45 @@ runs:
         else
           echo "⚠️ No existing cache - building from scratch"
           echo "Cache will be populated for future builds"
+        fi
+        
+        echo "::endgroup::"
+
+    - name: Cache ccache
+      uses: actions/cache@v4
+      with:
+        path: ${{ env.CCACHE_DIR }}        
+        key: ccache-suki-v4-${{ runner.os }}-${{ env.ANDROID_VER }}-${{ env.KERNEL_VER }}-${{ env.CLANG_VERSION_SHORT }}-${{ env.OP_MODEL }}-${{ github.run_id }}
+        restore-keys: |
+          # Priority 1: Same model, any run
+          ccache-suki-v4-${{ runner.os }}-${{ env.ANDROID_VER }}-${{ env.KERNEL_VER }}-${{ env.CLANG_VERSION_SHORT }}-${{ env.OP_MODEL }}-
+          # Priority 2: Same toolchain, any model
+          ccache-suki-v4-${{ runner.os }}-${{ env.ANDROID_VER }}-${{ env.KERNEL_VER }}-${{ env.CLANG_VERSION_SHORT }}-
+          # Priority 3: Same kernel version
+          ccache-suki-v4-${{ runner.os }}-${{ env.ANDROID_VER }}-${{ env.KERNEL_VER }}-
+          # Priority 4: Same Android version
+          ccache-suki-v4-${{ runner.os }}-${{ env.ANDROID_VER }}-
+          # Priority 5: Any cache (last resort)
+          ccache-suki-v4-${{ runner.os }}-
+
+    - name: Verify Cache Restore
+      shell: bash
+      run: |
+        echo "::group::Cache restore verification"
+        
+        if [ -d "$CCACHE_DIR" ] && find "$CCACHE_DIR" -type f -print -quit 2>/dev/null | grep -q .; then
+          echo "✅ Cache restored successfully"
+          echo ""
+          echo "Restored cache statistics:"
+          ccache -s | head -n 15
+          
+          # Show which cache was restored
+          CACHE_SIZE=$(du -sh "$CCACHE_DIR" | cut -f1)
+          echo ""
+          echo "Cache size: $CACHE_SIZE"
+        else
+          echo "ℹ️ No cache restored - cold build"
+          echo "This is expected for first builds or after cache eviction"
         fi
         
         echo "::endgroup::"
@@ -1389,7 +1410,7 @@ runs:
         echo '```' >> $GITHUB_STEP_SUMMARY
         ccache -s >> $GITHUB_STEP_SUMMARY
         echo '```' >> $GITHUB_STEP_SUMMARY
-
+    
     - name: Trim ccache
       if: ${{ always() && inputs.clean != 'true' }}
       shell: bash
@@ -1410,49 +1431,6 @@ runs:
         fi
         
         echo "::endgroup::"
-
-    # ✅ NEW: Disk snapshot before cache decision
-    - name: Disk snapshot
-      if: always()
-      shell: bash
-      run: |
-        echo "::group::Current disk usage"
-        df -h / | tail -n1
-        echo "::endgroup::"
-
-    # ✅ FIX: Disk space guard before cache save
-    - name: Decide Cache Save
-      id: decide_save
-      if: always()
-      shell: bash
-      run: |
-        set -euo pipefail
-        echo "::group::Check disk space for cache save"
-        
-        AVAIL_KB=$(df -k / | awk 'NR==2{print $4}')
-        AVAIL_GB=$(awk -v k="$AVAIL_KB" 'BEGIN{printf "%.2f", k/1024/1024}')
-        
-        echo "Available disk space: ${AVAIL_GB} GB"
-        
-        # Require at least 3GB free
-        if [ "$AVAIL_KB" -lt $((3*1024*1024)) ]; then
-          echo "LOW_DISK_SKIP=1" >> "$GITHUB_ENV"
-          echo "⚠️ Skipping cache save due to low disk space (${AVAIL_GB} GB < 3 GB)"
-          echo "::warning::Cache save skipped - insufficient disk space"
-        else
-          echo "LOW_DISK_SKIP=0" >> "$GITHUB_ENV"
-          echo "✅ Sufficient disk space for cache save (${AVAIL_GB} GB)"
-        fi
-        
-        echo "::endgroup::"
-    
-    # ✅ FIX: V4 cache save with unique run ID
-    - name: Save ccache
-      if: ${{ success() && env.LOW_DISK_SKIP == '0' }}
-      uses: actions/cache/save@v4
-      with:
-        path: ${{ env.CCACHE_DIR }}
-        key: ccache-suki-v4-${{ runner.os }}-${{ env.ANDROID_VER }}-${{ env.KERNEL_VER }}-${{ env.CLANG_VERSION_SHORT }}-${{ github.run_id }}
 
     - name: Collect Build Statistics
       id: collect_stats
