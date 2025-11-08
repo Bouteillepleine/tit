@@ -83,10 +83,7 @@ runs:
       run: |
         set -euo pipefail
         echo '${{ inputs.op_config_json }}' > /tmp/config.json
-        
-        # ✅ FIX: Proper JSON parsing with tostring and sanitization
         jq -r 'to_entries[] | "OP_\(.key | ascii_upcase)=\(.value | tostring)"' /tmp/config.json >> "$GITHUB_ENV"
-        
         echo "Parsed config:"
         jq '.' /tmp/config.json
 
@@ -159,12 +156,10 @@ runs:
         echo "Before cleanup:"
         df -h /
         
-        # Docker cleanup
         if command -v docker >/dev/null 2>&1; then
           docker system prune -af 2>/dev/null || true
         fi
         
-        # Remove large unused directories
         sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost || true
         sudo rm -rf /opt/hostedtoolcache/CodeQL || true
         sudo rm -rf "$AGENT_TOOLSDIRECTORY" || true
@@ -178,7 +173,6 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
-        # CONFIG already exported in validation step
         REPO="/usr/local/bin/repo"
         if [ ! -x "$REPO" ]; then
           curl -s https://storage.googleapis.com/git-repo-downloads/repo -o "$REPO"
@@ -202,13 +196,6 @@ runs:
         echo "CPU:"
         echo "  Cores: $(nproc --all)"
         echo "  Model: $(lscpu | grep 'Model name' | cut -d: -f2 | xargs)"
-        echo ""
-        echo "ccache:"
-        if [ -d "${CCACHE_DIR:-$HOME/.ccache}" ]; then
-          du -sh "${CCACHE_DIR:-$HOME/.ccache}" 2>/dev/null || echo "  Not initialized"
-        else
-          echo "  Not initialized"
-        fi
         echo "::endgroup::"
 
     - name: Initialize and Sync Kernel Source
@@ -256,7 +243,6 @@ runs:
         echo "::group::Get kernel version"
         CONFIG_DIR="$GITHUB_WORKSPACE/$CONFIG"
         
-        # ✅ Standardize artifacts directory once
         ARTIFACTS_DIR="$CONFIG_DIR/kernel_platform/artifacts"
         mkdir -p "$ARTIFACTS_DIR"
         echo "ARTIFACTS_DIR=$ARTIFACTS_DIR" >> "$GITHUB_ENV"
@@ -286,14 +272,11 @@ runs:
         
         VERSION=$(grep '^VERSION *=' Makefile | awk '{print $3}')
         PATCHLEVEL=$(grep '^PATCHLEVEL *=' Makefile | awk '{print $3}')
-        
-        # ✅ FIX: Default SUBLEVEL to 0 if missing
         SUBLEVEL=$(grep '^SUBLEVEL *=' Makefile | awk '{print $3}')
         SUBLEVEL="${SUBLEVEL:-0}"
         
         FULL_VERSION="$VERSION.$PATCHLEVEL.$SUBLEVEL"
         
-        # ✅ Use standardized ARTIFACTS_DIR
         cd "$ARTIFACTS_DIR"
         echo "$ANDROID_VERSION-$FULL_VERSION" > "${OP_MODEL}.txt"
         echo "$ANDROID_VERSION-$FULL_VERSION" > "kernel_version.txt"
@@ -347,20 +330,17 @@ runs:
         
         short=""
         
-        # Method 1: Extract from toolchain directory path
         toolchain_dir="$(dirname "${CLANG_BIN_PATH}")"
         if echo "$toolchain_dir" | grep -qE '/clang-r[0-9]+[a-z]?$'; then
           short="$(basename "$toolchain_dir" | sed 's/^clang-//')"
           echo "✅ Extracted from path: $short"
         fi
         
-        # Method 2: Extract from CLANG_BIN_PATH itself
         if [ -z "$short" ] && echo "${CLANG_BIN_PATH}" | grep -qE 'clang-r[0-9]+[a-z]?'; then
           short="$(echo "${CLANG_BIN_PATH}" | grep -oE 'clang-r[0-9]+[a-z]?' | tail -1 | sed 's/^clang-//')"
           echo "✅ Extracted from bin path: $short"
         fi
         
-        # Method 3: Read from build.config.constants
         if [ -z "$short" ]; then
           config_file="$GITHUB_WORKSPACE/$CONFIG/kernel_platform/common/build.config.constants"
           if [ -f "$config_file" ]; then
@@ -371,7 +351,6 @@ runs:
           fi
         fi
         
-        # Method 4: Parse from clang --version output
         if [ -z "$short" ]; then
           short="$("${CLANG_BIN_PATH}/clang" --version | sed -n '1s/.*clang-r\([0-9]\+[a-z]\?\).*/\1/p')"
           if [ -n "$short" ]; then
@@ -379,13 +358,11 @@ runs:
           fi
         fi
         
-        # Fallback: Use default stable version
         if [ -z "$short" ]; then
           short="r487747c"
           echo "⚠️ Could not extract version, using default: $short"
         fi
         
-        # ✅ FIX: Normalize to family representatives
         case "$short" in
           r510928*) short="r510928" ;;
           r487747*) short="r487747c" ;;
@@ -425,12 +402,12 @@ runs:
         echo "   Version: ${CLANG_VERSION}"
         echo "   Fingerprint: ${CLANG_VERSION_SHORT}"
         echo "::endgroup::"
-   
-    - name: Set Cache Environment
+       
+    - name: Setup ccache
       shell: bash
       run: |
         set -euo pipefail
-        echo "::group::Configure ccache environment"
+        echo "::group::Setup ccache"
         
         CACHE_DIR="$HOME/.ccache"
         mkdir -p "$CACHE_DIR"
@@ -441,31 +418,10 @@ runs:
           echo "CCACHE_BASEDIR=${GITHUB_WORKSPACE}"
           echo "CCACHE_COMPILERCHECK=content"
           echo "CCACHE_NOHASHDIR=true"
+          echo "CCACHE_IGNOREOPTIONS=--sysroot*"
         } >> "$GITHUB_ENV"
         
-        echo "Cache configuration:"
-        echo "  Directory: $CACHE_DIR"
-        echo "  Max size: 3G"
-        echo "  Base dir: ${GITHUB_WORKSPACE}"
-        echo "  Android: ${ANDROID_VER:-unknown}"
-        echo "  Kernel: ${KERNEL_VER:-unknown}"
-        echo "  Clang: ${CLANG_VERSION_SHORT:-unknown}"
-        echo "  Model: ${OP_MODEL:-unknown}"
-        echo "::endgroup::"   
-   
-    - name: Configure ccache
-      shell: bash
-      run: |
-        set -euo pipefail
-        echo "::group::Configure ccache for maximum performance"
-        
-        export CCACHE_DIR="${CCACHE_DIR}"
-        export CCACHE_MAXSIZE="${CCACHE_MAXSIZE}"
-        
-        # Set hard limit
-        ccache -M "$CCACHE_MAXSIZE"
-        
-        # Performance optimizations
+        ccache -M 3G
         ccache -o compression=true
         ccache -o compression_level=3
         ccache -o direct_mode=true
@@ -473,90 +429,56 @@ runs:
         ccache -o file_clone=true || true
         ccache -o inode_cache=true || true
         ccache -o umask=002
+        ccache -o sloppiness=file_macro,time_macros,include_file_mtime,include_file_ctime,pch_defines,system_headers,locale
         
-        # Enable depend mode if available
         if ccache --help 2>&1 | grep -q 'depend_mode'; then
           ccache -o depend_mode=true
         fi
         
-        # Aggressive sloppiness for maximum hits
-        ccache -o sloppiness=file_macro,time_macros,include_file_mtime,include_file_ctime,pch_defines,system_headers,locale
-        
-        # Ignore sysroot variations
-        echo "CCACHE_IGNOREOPTIONS=--sysroot*" >> "$GITHUB_ENV"
-        
-        echo "✅ ccache configured for production"
-        echo ""
-        echo "Configuration applied:"
-        echo "  Max size: 3G (hard limit)"
-        echo "  Base dir: ${GITHUB_WORKSPACE}"
-        echo "  Compression: zstd level 3"
-        echo "  Direct mode: enabled"
-        echo "  Depend mode: $(ccache --help 2>&1 | grep -q 'depend_mode' && echo 'enabled' || echo 'not available')"
-        echo ""
-        
-        if [ -d "$CCACHE_DIR" ] && find "$CCACHE_DIR" -type f -print -quit 2>/dev/null | grep -q .; then
-          echo "✅ Restored cache found"
-          echo ""
-          echo "Pre-build cache statistics:"
-          ccache -s | head -n 20
+        if [ "${{ inputs.clean }}" = "true" ]; then
+          echo "CCACHE_DISABLE=1" >> "$GITHUB_ENV"
+          echo "⚠️ Clean build mode - ccache disabled"
         else
-          echo "⚠️ No existing cache - building from scratch"
-          echo "Cache will be populated for future builds"
+          echo "✅ ccache enabled (3G max)"
         fi
         
+        echo ""
+        echo "Cache configuration:"
+        echo "  Directory: $CACHE_DIR"
+        echo "  Max size: 3G"
+        echo "  Android: ${ANDROID_VER}"
+        echo "  Kernel: ${KERNEL_VER}"
+        echo "  Clang: ${CLANG_VERSION_SHORT}"
+        echo "  Model: ${OP_MODEL}"
         echo "::endgroup::"
 
-    - name: Cache ccache
+    - name: Restore ccache
       uses: actions/cache@v4
       with:
-        path: ${{ env.CCACHE_DIR }}        
-        key: ccache-suki-v4-${{ runner.os }}-${{ env.ANDROID_VER }}-${{ env.KERNEL_VER }}-${{ env.CLANG_VERSION_SHORT }}-${{ env.OP_MODEL }}-${{ github.run_id }}
+        path: ${{ env.CCACHE_DIR }}
+        key: ccache-suki-v4-${{ env.OP_MODEL }}-${{ env.OP_OS_VERSION }}-${{ env.KERNEL_FULL_VER }}-${{ env.CLANG_VERSION_SHORT }}
         restore-keys: |
-          # Priority 1: Same model, any run
-          ccache-suki-v4-${{ runner.os }}-${{ env.ANDROID_VER }}-${{ env.KERNEL_VER }}-${{ env.CLANG_VERSION_SHORT }}-${{ env.OP_MODEL }}-
-          # Priority 2: Same toolchain, any model
-          ccache-suki-v4-${{ runner.os }}-${{ env.ANDROID_VER }}-${{ env.KERNEL_VER }}-${{ env.CLANG_VERSION_SHORT }}-
-          # Priority 3: Same kernel version
-          ccache-suki-v4-${{ runner.os }}-${{ env.ANDROID_VER }}-${{ env.KERNEL_VER }}-
-          # Priority 4: Same Android version
-          ccache-suki-v4-${{ runner.os }}-${{ env.ANDROID_VER }}-
-          # Priority 5: Any cache (last resort)
-          ccache-suki-v4-${{ runner.os }}-
+          ccache-suki-v4-${{ env.OP_MODEL }}-${{ env.OP_OS_VERSION }}-${{ env.KERNEL_FULL_VER }}-
+          ccache-suki-v4-${{ env.OP_MODEL }}-${{ env.OP_OS_VERSION }}-          
 
-    - name: Verify Cache Restore
+    - name: Verify ccache
+      if: ${{ inputs.clean != 'true' }}
       shell: bash
       run: |
-        echo "::group::Cache restore verification"
+        set -euo pipefail
+        echo "::group::Verify ccache"
         
         if [ -d "$CCACHE_DIR" ] && find "$CCACHE_DIR" -type f -print -quit 2>/dev/null | grep -q .; then
           echo "✅ Cache restored successfully"
           echo ""
-          echo "Restored cache statistics:"
-          ccache -s | head -n 15
-          
-          # Show which cache was restored
-          CACHE_SIZE=$(du -sh "$CCACHE_DIR" | cut -f1)
+          ccache -s | head -n 20
           echo ""
-          echo "Cache size: $CACHE_SIZE"
+          echo "Cache size: $(du -sh "$CCACHE_DIR" 2>/dev/null | cut -f1)"
         else
           echo "ℹ️ No cache restored - cold build"
-          echo "This is expected for first builds or after cache eviction"
+          echo "Cache will be populated for future builds"
         fi
         
-        echo "::endgroup::"
-
-    - name: Handle Clean Build Option
-      if: ${{ inputs.clean == 'true' }}
-      shell: bash
-      run: |
-        set -euo pipefail
-        echo "::group::Clean build requested"
-        echo "⚠️ Clean build mode enabled - ccache will be bypassed"
-        
-        echo "CCACHE_DISABLE=1" >> "$GITHUB_ENV"
-        
-        echo "✅ ccache disabled for clean build"
         echo "::endgroup::"
 
     - name: Clone AnyKernel3
@@ -885,7 +807,7 @@ runs:
         if patch -p1 -F 3 < 69_hide_stuff.patch; then
           echo "✅ Hide stuff patch applied successfully"
         else
-                    echo "::warning::Hide stuff patch applied with warnings"
+          echo "::warning::Hide stuff patch applied with warnings"
         fi
         
         echo "✅ Hide stuff patches applied"
@@ -1316,10 +1238,8 @@ runs:
         BUILD_START=$(date +%s)
         set -o pipefail
         
-        # ✅ FIX: Cap build log to 8MB to prevent disk issues
         make -j"$(nproc --all)" O="$OUT" KCFLAGS="$KCFLAGS" KCPPFLAGS="$KCPPFLAGS" 2>&1 | tee build.log
         
-        # Trim log if too large
         if [ -f build.log ]; then
           LOG_SIZE=$(stat -c%s build.log)
           if [ "$LOG_SIZE" -gt 8388608 ]; then
@@ -1362,35 +1282,20 @@ runs:
         echo "============================================"
         echo "::endgroup::"
 
-    - name: 📊 ccache Post-Build Statistics
+    - name: ccache Statistics
       id: ccache_stats
       if: ${{ always() && inputs.clean != 'true' }}
       shell: bash
       run: |
         set -euo pipefail
-        echo "::group::ccache final statistics"
+        echo "::group::ccache statistics"
         
-        export CCACHE_DIR="${CCACHE_DIR}"
-        
-        echo "ccache Statistics"
         ccache -s
         
         STATS="$(ccache -s)"
-        
-        CACHEABLE=$(echo "$STATS" | awk '/Cacheable calls:/ {
-          match($0, /[0-9]+/); 
-          print substr($0, RSTART, RLENGTH)
-        }' | head -n1)
-        
-        HITS=$(echo "$STATS" | awk '/^[[:space:]]*Hits:/ {
-          match($0, /[0-9]+/); 
-          print substr($0, RSTART, RLENGTH)
-        }' | head -n1)
-        
-        DIRECT=$(echo "$STATS" | awk '/Direct:/ {
-          match($0, /[0-9]+/); 
-          print substr($0, RSTART, RLENGTH)
-        }' | head -n1)
+        CACHEABLE=$(echo "$STATS" | awk '/Cacheable calls:/ {match($0, /[0-9]+/); print substr($0, RSTART, RLENGTH)}' | head -n1)
+        HITS=$(echo "$STATS" | awk '/^[[:space:]]*Hits:/ {match($0, /[0-9]+/); print substr($0, RSTART, RLENGTH)}' | head -n1)
+        DIRECT=$(echo "$STATS" | awk '/Direct:/ {match($0, /[0-9]+/); print substr($0, RSTART, RLENGTH)}' | head -n1)
         
         if [ "${CACHEABLE:-0}" -gt 0 ]; then
           HIT_RATE=$(awk -v h="${HITS:-0}" -v c="$CACHEABLE" 'BEGIN{printf "%.1f", (h/c)*100}')
@@ -1403,32 +1308,8 @@ runs:
         echo "hit_rate=${HIT_RATE}%" >> "$GITHUB_OUTPUT"
         echo "direct_rate=${DIRECT_RATE}%" >> "$GITHUB_OUTPUT"
         
-        echo "::endgroup::"
-        
-        echo "## 📊 ccache Statistics" >> $GITHUB_STEP_SUMMARY
-        echo "" >> $GITHUB_STEP_SUMMARY
-        echo '```' >> $GITHUB_STEP_SUMMARY
-        ccache -s >> $GITHUB_STEP_SUMMARY
-        echo '```' >> $GITHUB_STEP_SUMMARY
-    
-    - name: Trim ccache
-      if: ${{ always() && inputs.clean != 'true' }}
-      shell: bash
-      run: |
-        set -euo pipefail
-        echo "::group::Trim ccache before save"
-        
-        if command -v ccache >/dev/null 2>&1; then
-          echo "Enforcing 3G limit..."
-          ccache -M 3G
-          
-          echo "Evicting entries older than 7 days..."
-          ccache --evict-older-than 7d || true
-          
-          echo ""
-          echo "Final cache statistics:"
-          ccache -s | head -n 20
-        fi
+        ccache -M 3G
+        ccache --evict-older-than 7d || true
         
         echo "::endgroup::"
 
@@ -1486,7 +1367,6 @@ runs:
         set -euo pipefail
         echo "::group::Download ZRAM module"
         
-        # ✅ Use standardized ARTIFACTS_DIR
         mkdir -p "${ARTIFACTS_DIR}"
         
         KERNEL_VER="${{ env.KERNEL_VER }}"
@@ -1554,8 +1434,6 @@ runs:
         KERNEL_PATH="$GITHUB_WORKSPACE/$CONFIG/kernel_platform"
         IMG="$KERNEL_PATH/common/out/arch/arm64/boot/Image"
         ANYKERNEL_DIR="$GITHUB_WORKSPACE/AnyKernel3"
-        
-        # ✅ Use standardized ARTIFACTS_DIR
         
         if [ ! -f "$IMG" ]; then
           echo "::error::Kernel Image not found"
@@ -1629,8 +1507,6 @@ runs:
       run: |
         set -euo pipefail
         echo "::group::Save build metadata"
-        
-        # ✅ Use standardized ARTIFACTS_DIR
         
         cat > "${ARTIFACTS_DIR}/build_info.json" << EOF
         {
