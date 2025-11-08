@@ -399,7 +399,6 @@ runs:
         echo ""
         echo "🔍 Verifying structure..."
         
-        # ✅ FIX 1: Check correct paths under kernel_platform
         KP="kernel_platform"
         EXPECTED=( "$KP/common" "$KP/prebuilts" "$KP/prebuilts-master" )
         MISSING=()
@@ -442,7 +441,6 @@ runs:
         ARTIFACTS_DIR="$CONFIG_DIR/artifacts"
         mkdir -p "$ARTIFACTS_DIR"
         
-        # ✅ FIX 2: Fallback to msm-kernel if common doesn't exist
         if [ -d "$CONFIG_DIR/kernel_platform/common" ]; then
           cd "$CONFIG_DIR/kernel_platform/common"
         elif [ -d "$CONFIG_DIR/kernel_platform/msm-kernel" ]; then
@@ -524,59 +522,162 @@ runs:
         $CLANG_FOUND || { echo "::error::No clang toolchain found"; exit 1; }
         echo "CLANG_BIN_PATH=$CLANG_BIN" >> "$GITHUB_ENV"
         
-        # ✅ FIX 4: Export PATH early for downstream steps
-        echo "PATH=$CLANG_BIN:$PATH" >> "$GITHUB_ENV"
+        echo "PATH=${CLANG_BIN_PATH}:$PATH" >> "$GITHUB_ENV"
         
         CLANG_VERSION="$("$CLANG_BIN/clang" --version | head -n1)"
         echo "CLANG_VERSION=$CLANG_VERSION" >> "$GITHUB_ENV"
         echo "✅ Detected Clang: $CLANG_VERSION"
         echo "::endgroup::"
 
-    - name: Derive Clang Short Version
+    - name: Normalize CLANG_VERSION_SHORT from detected path
       shell: bash
       run: |
         set -euo pipefail
-        echo "::group::Derive Clang fingerprint"
+        echo "::group::Normalize clang version"
         
-        short="$("${CLANG_BIN_PATH}/clang" --version | sed -n '1s/.*clang-r\([0-9.]\+\).*/\1/p')"
-        
-        if [ -z "$short" ]; then
-          short="$("${CLANG_BIN_PATH}/clang" --version | sha256sum | cut -c1-8)"
-          echo "⚠️ Could not extract clang-r version, using hash: $short"
+        if [ -n "${CLANG_BIN_PATH:-}" ]; then
+          toolchain_dir="$(dirname "$CLANG_BIN_PATH")"
+          
+          # Expect .../clang-rXXXXX[letter]
+          if echo "$toolchain_dir" | grep -qE '/clang-r[0-9]+[a-z]*$'; then
+            detected_short="$(basename "$toolchain_dir" | sed 's/^clang-//')"
+            
+            if [ "$detected_short" != "${CLANG_VERSION_SHORT:-}" ]; then
+              echo "⚠️ CLANG_VERSION_SHORT mismatch:"
+              echo "   Environment: '${CLANG_VERSION_SHORT:-unset}'"
+              echo "   Detected: '$detected_short'"
+              echo "   → Using detected version"
+              echo "CLANG_VERSION_SHORT=$detected_short" >> "$GITHUB_ENV"
+            else
+              echo "✅ CLANG_VERSION_SHORT matches detected: $detected_short"
+            fi
+          else
+            echo "ℹ️ Toolchain path doesn't match expected pattern, keeping env value"
+          fi
         else
-          echo "✅ Clang version fingerprint: $short"
+          echo "⚠️ CLANG_BIN_PATH not set, cannot validate"
         fi
         
-        echo "CLANG_VERSION_SHORT=$short" >> "$GITHUB_ENV"
-        
-        CLANG_FULL_VERSION="$("${CLANG_BIN_PATH}/clang" --version | head -n1)"
-        echo "CLANG_FULL_VERSION=$CLANG_FULL_VERSION" >> "$GITHUB_ENV"
-        
-        echo "Full Clang version: $CLANG_FULL_VERSION"
+        echo "Final CLANG_VERSION_SHORT: ${CLANG_VERSION_SHORT:-unknown}"
         echo "::endgroup::"
 
-    - name: Validate Clang Path
+    - name: Set Cache Strategy
       shell: bash
       run: |
         set -euo pipefail
-        echo "::group::Validate Clang toolchain"
+        echo "::group::Configure cache strategy"
         
-        if [ ! -d "${CLANG_BIN_PATH}" ]; then
-          echo "::error::Clang binary path does not exist: ${CLANG_BIN_PATH}"
-          exit 1
+        # Stable clang version fingerprint
+        BUILD_CONFIG="${{ github.workspace }}/${{ env.CONFIG }}/kernel_platform/build.config.constants"
+        if [ -f "$BUILD_CONFIG" ]; then
+          CLANG_VERSION=$(grep -oP 'CLANG_VERSION=\K[^"]+' "$BUILD_CONFIG" | head -1)
+          CLANG_VERSION="${CLANG_VERSION#clang-}"
+        else
+          CLANG_VERSION="r487747c"
         fi
         
-        if [ ! -x "${CLANG_BIN_PATH}/clang" ]; then
-          echo "::error::Clang binary not executable: ${CLANG_BIN_PATH}/clang"
-          exit 1
+        # Only set if not already normalized from detected path
+        if [ -z "${CLANG_VERSION_SHORT:-}" ]; then
+          echo "CLANG_VERSION_SHORT=$CLANG_VERSION" >> "$GITHUB_ENV"
+        else
+          echo "ℹ️ CLANG_VERSION_SHORT already set to: ${CLANG_VERSION_SHORT}"
         fi
         
-        echo "✅ Clang toolchain validated"
-        echo "   Path: ${CLANG_BIN_PATH}"
-        echo "   Version: ${CLANG_VERSION}"
+        # Single ccache directory
+        echo "CCACHE_DIR=$HOME/.ccache" >> "$GITHUB_ENV"
+        echo "CCACHE_BASEDIR=${GITHUB_WORKSPACE}" >> "$GITHUB_ENV"
+        echo "CCACHE_MAXSIZE=3G" >> "$GITHUB_ENV"
+        
+        # Device hash (optional - use only if you need per-device isolation)
+        DEVICE_HASH=$(echo -n "${OP_MODEL}-${OP_SOC}" | sha256sum | cut -c1-8)
+        echo "DEVICE_HASH=$DEVICE_HASH" >> "$GITHUB_ENV"
+        
+        echo "📦 Cache configuration:"
+        echo "  Clang: ${CLANG_VERSION_SHORT:-$CLANG_VERSION}"
+        echo "  CCACHE_DIR: $HOME/.ccache"
+        echo "  BaseDir: ${GITHUB_WORKSPACE}"
+        echo "  Max size: 3G"
         echo "::endgroup::"
+
+    - name: Ensure ccache is available
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "::group::Check ccache availability"
+        
+        if ! command -v ccache >/dev/null 2>&1; then
+          echo "⚠️ ccache not found; attempting install..."
+          
+          if command -v apt-get >/dev/null 2>&1; then
+            echo "Installing ccache via apt-get..."
+            sudo apt-get update -qq
+            sudo apt-get install -y ccache
+            
+            if command -v ccache >/dev/null 2>&1; then
+              echo "✅ ccache installed successfully"
+            else
+              echo "::error::Failed to install ccache"
+              exit 1
+            fi
+          else
+            echo "::error::ccache not installed and no apt-get available"
+            exit 1
+          fi
+        else
+          echo "✅ ccache already available"
+        fi
+        
+        echo ""
+        echo "ccache version:"
+        ccache --version
+        
+        echo "::endgroup::"
+
+    - name: Resolve toolchain cache paths
+      id: resolve_toolchain
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "::group::Resolve toolchain paths"
+        
+        base="${{ github.workspace }}/${{ env.CONFIG }}/kernel_platform"
+        p1="$base/prebuilts/clang/host/linux-x86/clang-${CLANG_VERSION_SHORT}"
+        p2="$base/prebuilts-master/clang/host/linux-x86/clang-${CLANG_VERSION_SHORT}"
+        
+        paths=()
+        [ -d "$p1" ] && paths+=("$p1") && echo "✓ Found: $p1"
+        [ -d "$p2" ] && paths+=("$p2") && echo "✓ Found: $p2"
+        
+        if [ ${#paths[@]} -eq 0 ]; then
+          echo "⚠️ No toolchain directories found (will be downloaded during sync)"
+          echo "paths=" >> "$GITHUB_OUTPUT"
+          echo "has_paths=false" >> "$GITHUB_OUTPUT"
+        else
+          echo "✅ Found ${#paths[@]} toolchain path(s)"
+          printf '%s\n' "${paths[@]}" > /tmp/toolchain_paths
+          {
+            echo "paths<<EOF"
+            cat /tmp/toolchain_paths
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+          echo "has_paths=true" >> "$GITHUB_OUTPUT"
+        fi
+        
+        echo "::endgroup::"
+
+    - name: 🔧 Cache Clang Toolchain (Narrow)
+      if: ${{ steps.resolve_toolchain.outputs.has_paths == 'true' }}
+      id: cache_toolchain
+      uses: actions/cache@v4
+      with:
+        enableCrossOsArchive: false
+        path: ${{ steps.resolve_toolchain.outputs.paths }}
+        key: tools-v4-${{ runner.os }}-${{ env.CLANG_VERSION_SHORT }}
+        restore-keys: |
+          tools-v4-${{ runner.os }}-
 
     - name: 🔍 Validate Cache Key Components
+      id: validate_cache_key
       shell: bash
       run: |
         set -euo pipefail
@@ -618,214 +719,83 @@ runs:
           echo "   This usually indicates a version detection issue"
           echo ""
           echo "::warning::Cache disabled due to invalid key components"
+          echo "CCACHE_DISABLE=1" >> "$GITHUB_ENV"
+          echo "cache_valid=false" >> "$GITHUB_OUTPUT"
         else
-          CACHE_KEY="ccache-suki-v3-${ANDROID_VER}-${KERNEL_VER}-${CLANG_VERSION_SHORT}"
+          CACHE_KEY="ccache-suki-v4-${{ runner.os }}-${ANDROID_VER}-${KERNEL_VER}-${CLANG_VERSION_SHORT}"
           echo "✅ Cache key validation passed"
           echo "   Key: $CACHE_KEY"
           echo ""
           echo "📊 Cache sharing scope:"
           echo "   All devices with android${ANDROID_VER}-${KERNEL_VER} + clang-${CLANG_VERSION_SHORT}"
           echo "   will share this cache for maximum efficiency"
+          echo "cache_valid=true" >> "$GITHUB_OUTPUT"
         fi
         
         echo "::endgroup::"
 
-    - name: Set Cache Environment
-      shell: bash
-      run: |
-        set -euo pipefail
-        echo "::group::Configure ccache environment"
-        
-        CACHE_DIR="$HOME/.ccache"
-        echo "CCACHE_DIR=$CACHE_DIR" >> "$GITHUB_ENV"
-        echo "CCACHE_MAXSIZE=2G" >> "$GITHUB_ENV"
-        
-        mkdir -p "$CACHE_DIR"
-        
-        # Export safe versions to prevent empty cache keys
-        ANDROID_VER_SAFE="${ANDROID_VER:-unknown}"
-        KERNEL_VER_SAFE="${KERNEL_VER:-unknown}"
-        CLANG_VER_SAFE="${CLANG_VERSION_SHORT:-unknown}"
-        
-        # Ensure env vars are set for cache keys (idempotent)
-        echo "ANDROID_VER=${ANDROID_VER_SAFE}" >> "$GITHUB_ENV"
-        echo "KERNEL_VER=${KERNEL_VER_SAFE}" >> "$GITHUB_ENV"
-        echo "CLANG_VERSION_SHORT=${CLANG_VER_SAFE}" >> "$GITHUB_ENV"
-        
-        echo "📦 Cache configuration:"
-        echo "  Directory: $CACHE_DIR"
-        echo "  Max size: 2G"
-        echo "  Strategy: Kernel-version-based sharing"
-        echo ""
-        echo "🔑 Cache key components:"
-        echo "  Android: $ANDROID_VER_SAFE"
-        echo "  Kernel: $KERNEL_VER_SAFE"
-        echo "  Clang: $CLANG_VER_SAFE"
-        echo "  Device: ${OP_MODEL:-unknown} (for logging only)"
-        echo "::endgroup::"
-
-    - name: Ensure ccache is available
-      shell: bash
-      run: |
-        set -euo pipefail
-        echo "::group::Check ccache availability"
-        
-        if ! command -v ccache >/dev/null 2>&1; then
-          echo "⚠️ ccache not found; attempting install..."
-          
-          if command -v apt-get >/dev/null 2>&1; then
-            echo "Installing ccache via apt-get..."
-            sudo apt-get update -qq
-            sudo apt-get install -y ccache
-            
-            if command -v ccache >/dev/null 2>&1; then
-              echo "✅ ccache installed successfully"
-            else
-              echo "::error::Failed to install ccache"
-              exit 1
-            fi
-          else
-            echo "::error::ccache not installed and no apt-get available"
-            exit 1
-          fi
-        else
-          echo "✅ ccache already available"
-        fi
-        
-        echo ""
-        echo "ccache version:"
-        ccache --version
-        
-        echo "::endgroup::"
-
-    - name: ♻️ Restore ccache
+    - name: ♻️ Restore ccache (single, stable)
       id: cache_restore
       uses: actions/cache@v4
-      if: |
-        inputs.clean != 'true' && 
-        env.ANDROID_VER != 'unknown' && 
-        env.KERNEL_VER != 'unknown' && 
-        env.CLANG_VERSION_SHORT != 'unknown' &&
-        env.ANDROID_VER != '' &&
-        env.KERNEL_VER != '' &&
-        env.CLANG_VERSION_SHORT != ''
+      if: ${{ inputs.clean != 'true' && steps.validate_cache_key.outputs.cache_valid == 'true' }}
       with:
         enableCrossOsArchive: false
         path: ${{ env.CCACHE_DIR }}
-        key: ccache-suki-v3-${{ env.ANDROID_VER }}-${{ env.KERNEL_VER }}-${{ env.CLANG_VERSION_SHORT }}
+        key: ccache-suki-v4-${{ runner.os }}-${{ env.ANDROID_VER }}-${{ env.KERNEL_VER }}-${{ env.CLANG_VERSION_SHORT }}
         restore-keys: |
-          ccache-suki-v3-${{ env.ANDROID_VER }}-${{ env.KERNEL_VER }}-
-          ccache-suki-v3-${{ env.ANDROID_VER }}-
+          ccache-suki-v4-${{ runner.os }}-${{ env.ANDROID_VER }}-${{ env.KERNEL_VER }}-
+          ccache-suki-v4-${{ runner.os }}-${{ env.ANDROID_VER }}-
+          ccache-suki-v4-${{ runner.os }}-
 
     - name: 📊 Cache Status
-      if: ${{ inputs.clean != 'true' }}
+      if: ${{ inputs.clean != 'true' && steps.validate_cache_key.outputs.cache_valid == 'true' }}
       shell: bash
       run: |
         echo "::group::Cache restore status"
         
-        # Validate cache key components
-        KEY_VALID=true
-        for var in ANDROID_VER KERNEL_VER CLANG_VERSION_SHORT; do
-          val="${!var:-}"
-          if [ -z "$val" ] || [ "$val" = "unknown" ]; then
-            echo "⚠️ Invalid cache key component: $var='$val'"
-            KEY_VALID=false
-          fi
-        done
+        CACHE_KEY="ccache-suki-v4-${{ runner.os }}-${ANDROID_VER}-${KERNEL_VER}-${CLANG_VERSION_SHORT}"
         
-        if [ "$KEY_VALID" = "false" ]; then
-          echo ""
-          echo "❌ Cache restore skipped due to invalid key components"
-          echo "   This is expected on first run or if version detection failed"
-          echo "::endgroup::"
-          exit 0
-        fi
-        
-        # Report cache hit status
         if [ "${{ steps.cache_restore.outputs.cache-hit }}" = "true" ]; then
           echo "✅ Cache hit: Exact match found"
-          echo "   Key: ccache-suki-v3-${ANDROID_VER}-${KERNEL_VER}-${CLANG_VERSION_SHORT}"
+          echo "   Key: $CACHE_KEY"
         elif [ -n "${{ steps.cache_restore.outputs.cache-matched-key }}" ]; then
           echo "⚡ Cache restored from partial match"
+          echo "   Target: $CACHE_KEY"
           echo "   Matched: ${{ steps.cache_restore.outputs.cache-matched-key }}"
-          echo "   Target:  ccache-suki-v3-${ANDROID_VER}-${KERNEL_VER}-${CLANG_VERSION_SHORT}"
         else
           echo "❄️ Cache miss: Building from scratch"
-          echo "   Key: ccache-suki-v3-${ANDROID_VER}-${KERNEL_VER}-${CLANG_VERSION_SHORT}"
-          echo "   Cache will be populated for future builds"
+          echo "   Key: $CACHE_KEY"
         fi
         
         echo "::endgroup::"
 
-    - name: 🔧 Cache Clang Toolchain
-      id: cache_toolchain
-      uses: actions/cache@v4
-      with:
-        enableCrossOsArchive: false
-        path: |
-          ${{ github.workspace }}/${{ env.CONFIG }}/kernel_platform/prebuilts
-          ${{ github.workspace }}/${{ env.CONFIG }}/kernel_platform/prebuilts-master
-        # ✅ FIX 3: Correct .repo path for manifest hash
-        key: clang-toolchain-${{ env.OP_SOC }}-${{ env.CLANG_VERSION_SHORT }}-${{ hashFiles(format('{0}/.repo/**/manifest*.xml', env.CONFIG)) }}
-        restore-keys: |
-          clang-toolchain-${{ env.OP_SOC }}-${{ env.CLANG_VERSION_SHORT }}-
-          clang-toolchain-${{ env.OP_SOC }}-
-          clang-toolchain-
-   
     - name: Configure ccache
       shell: bash
       run: |
         set -euo pipefail
-        echo "::group::Configure ccache for maximum performance"
+        export CCACHE_DIR="${CCACHE_DIR:-$HOME/.ccache}"
+        mkdir -p "$CCACHE_DIR"
         
-        export CCACHE_DIR="$HOME/.ccache"
-        export CCACHE_MAXSIZE="2G"
+        ccache -M "${CCACHE_MAXSIZE:-3G}"
+        ccache -o compression=true
+        ccache -o compression_level=1
+        ccache -o depend_mode=true || true
+        ccache -o base_dir="${CCACHE_BASEDIR:-$GITHUB_WORKSPACE}"
+        ccache -o hash_dir=false
+        ccache -o direct_mode=true
+        ccache -o sloppiness=file_macro,time_macros,include_file_mtime,include_file_ctime,pch_defines,system_headers,locale
         
-        ccache -M "$CCACHE_MAXSIZE" >/dev/null 2>&1
-        
-        export CCACHE_COMPILERCHECK="content"
-        export CCACHE_BASEDIR="${GITHUB_WORKSPACE}"
-        export CCACHE_NOHASHDIR="true"
-        
-        ccache -o compression=true >/dev/null 2>&1
-        ccache -o compression_level=1 >/dev/null 2>&1
-        ccache -o max_files=0 >/dev/null 2>&1
-        ccache -o direct_mode=true >/dev/null 2>&1
-        ccache -o hash_dir=false >/dev/null 2>&1
-        ccache -o file_clone=true >/dev/null 2>&1
-        ccache -o inode_cache=true >/dev/null 2>&1
-        ccache -o umask=002 >/dev/null 2>&1
-        
-        if ccache --help 2>&1 | grep -q 'depend_mode'; then
-          ccache -o depend_mode=true >/dev/null 2>&1
+        if [ "${{ inputs.clean }}" = "true" ]; then
+          echo "CCACHE_DISABLE=1" >> "$GITHUB_ENV"
         fi
         
-        ccache -o sloppiness=file_macro,time_macros,include_file_mtime,include_file_ctime,pch_defines,system_headers,locale >/dev/null 2>&1
+        echo "✅ ccache configured"
         
-        export CCACHE_IGNOREOPTIONS="--sysroot*"
-        
-        {
-          echo "CCACHE_COMPILERCHECK=content"
-          echo "CCACHE_BASEDIR=${GITHUB_WORKSPACE}"
-          echo "CCACHE_NOHASHDIR=true"
-          echo "CCACHE_IGNOREOPTIONS=$CCACHE_IGNOREOPTIONS"
-        } >> "$GITHUB_ENV"
-        
-        echo "✅ ccache configured for production"
-        echo ""
-        
-        if [ -d "$CCACHE_DIR" ] && find "$CCACHE_DIR" -type f -print -quit 2>/dev/null | grep -q .; then
-          echo "✅ Restored cache found"
+        if [ -d "$CCACHE_DIR" ] && [ "$(find "$CCACHE_DIR" -type f 2>/dev/null | head -n1)" ]; then
           echo ""
-          echo "Pre-build statistics:"
-          
-          ccache -s | grep -Ei "(cache hit|cache miss|cache size|files in cache|evicted|cleanups|cacheable)" | head -n 20 || ccache -s | head -n 20
-        else
-          echo "⚠️ No existing cache - building from scratch"
-          echo "   Cache will be populated for future builds"
+          echo "Pre-build cache status:"
+          ccache -s | head -n 15
         fi
-        
-        echo "::endgroup::"
 
     - name: Handle Clean Build Option
       if: ${{ inputs.clean == 'true' }}
@@ -1654,98 +1624,27 @@ runs:
         echo "============================================"
         echo "::endgroup::"
 
-    - name: 📊 ccache Post-Build Statistics
-      id: ccache_stats
-      if: ${{ always() && inputs.clean != 'true' }}
+    - name: 📊 Cache Status
+      if: ${{ inputs.clean != 'true' }}
       shell: bash
       run: |
-        set -euo pipefail
-        echo "::group::ccache final statistics"
+        echo "::group::Cache restore status"
         
-        export CCACHE_DIR="${{ env.CCACHE_DIR }}"
+        CACHE_KEY="ccache-suki-v4-${{ runner.os }}-${ANDROID_VER}-${KERNEL_VER}-${CLANG_VERSION_SHORT}"
         
-        echo "ccache Statistics"
-        ccache -s
-        
-        STATS="$(ccache -s)"
-        
-        # Multi-version compatible parsing
-        CACHEABLE=$(echo "$STATS" | awk '/Cacheable calls:/ {
-          match($0, /[0-9]+/); 
-          print substr($0, RSTART, RLENGTH)
-        }' | head -n1)
-        
-        if [ -z "$CACHEABLE" ] || [ "$CACHEABLE" = "0" ]; then
-          TOTAL_HITS=$(echo "$STATS" | grep -i "cache hit" | grep -oE '[0-9]+' | head -n1 || echo "0")
-          TOTAL_MISS=$(echo "$STATS" | grep -i "cache miss" | grep -oE '[0-9]+' | head -n1 || echo "0")
-          CACHEABLE=$((TOTAL_HITS + TOTAL_MISS))
-        fi
-        
-        HITS=$(echo "$STATS" | awk '/^[[:space:]]*Hits:/ {
-          match($0, /[0-9]+/); 
-          print substr($0, RSTART, RLENGTH)
-        }' | head -n1)
-        
-        if [ -z "$HITS" ]; then
-          HITS=$(echo "$STATS" | grep -iE "cache hit|hits" | grep -oE '[0-9]+' | head -n1 || echo "0")
-        fi
-        
-        DIRECT=$(echo "$STATS" | awk '/Direct:/ {
-          match($0, /[0-9]+/); 
-          print substr($0, RSTART, RLENGTH)
-        }' | head -n1)
-        
-        if [ -z "$DIRECT" ]; then
-          DIRECT=$(echo "$STATS" | grep -i "direct" | grep -oE '[0-9]+' | head -n1 || echo "0")
-        fi
-        
-        CACHEABLE="${CACHEABLE:-0}"
-        HITS="${HITS:-0}"
-        DIRECT="${DIRECT:-0}"
-        
-        if [ "$CACHEABLE" -gt 0 ]; then
-          HIT_RATE=$(awk -v h="$HITS" -v c="$CACHEABLE" 'BEGIN{printf "%.1f", (h/c)*100}')
-          DIRECT_RATE=$(awk -v d="$DIRECT" -v c="$CACHEABLE" 'BEGIN{printf "%.1f", (d/c)*100}')
+        if [ "${{ steps.cache_restore.outputs.cache-hit }}" = "true" ]; then
+          echo "✅ Cache hit: Exact match found"
+          echo "   Key: $CACHE_KEY"
+        elif [ -n "${{ steps.cache_restore.outputs.cache-matched-key }}" ]; then
+          echo "⚡ Cache restored from partial match"
+          echo "   Target: $CACHE_KEY"
+          echo "   Matched: ${{ steps.cache_restore.outputs.cache-matched-key }}"
         else
-          HIT_RATE="0.0"
-          DIRECT_RATE="0.0"
-        fi
-        
-        echo "hit_rate=${HIT_RATE}" >> "$GITHUB_OUTPUT"
-        echo "direct_rate=${DIRECT_RATE}" >> "$GITHUB_OUTPUT"
-        
-        echo ""
-        echo "📊 Cache Performance Summary:"
-        echo "  Cacheable calls: $CACHEABLE"
-        echo "  Total hits: $HITS"
-        echo "  Direct hits: $DIRECT"
-        echo "  Hit rate: ${HIT_RATE}%"
-        echo "  Direct rate: ${DIRECT_RATE}%"
-        
-        if (( $(echo "$HIT_RATE > 80" | bc -l 2>/dev/null || echo 0) )); then
-          echo "  Status: 🔥 Excellent cache efficiency"
-        elif (( $(echo "$HIT_RATE > 50" | bc -l 2>/dev/null || echo 0) )); then
-          echo "  Status: ✅ Good cache performance"
-        elif (( $(echo "$HIT_RATE > 20" | bc -l 2>/dev/null || echo 0) )); then
-          echo "  Status: ⚡ Moderate cache usage"
-        elif [ "$CACHEABLE" -gt 0 ]; then
-          echo "  Status: ❄️ Cold cache (first build)"
-        else
-          echo "  Status: ⚠️ No cacheable operations detected"
+          echo "❄️ Cache miss: Building from scratch"
+          echo "   Key: $CACHE_KEY"
         fi
         
         echo "::endgroup::"
-        
-        echo "## 📊 ccache Statistics" >> $GITHUB_STEP_SUMMARY
-        echo "" >> $GITHUB_STEP_SUMMARY
-        echo '```' >> $GITHUB_STEP_SUMMARY
-        ccache -s >> $GITHUB_STEP_SUMMARY
-        echo '```' >> $GITHUB_STEP_SUMMARY
-        echo "" >> $GITHUB_STEP_SUMMARY
-        echo "**Parsed Metrics:**" >> $GITHUB_STEP_SUMMARY
-        echo "- Cacheable: $CACHEABLE" >> $GITHUB_STEP_SUMMARY
-        echo "- Hits: $HITS (${HIT_RATE}%)" >> $GITHUB_STEP_SUMMARY
-        echo "- Direct: $DIRECT (${DIRECT_RATE}%)" >> $GITHUB_STEP_SUMMARY
     
     - name: 💾 Check Disk Space (Post-Build)
       if: always()
