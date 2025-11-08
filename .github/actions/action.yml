@@ -414,7 +414,7 @@ runs:
         
         {
           echo "CCACHE_DIR=$CACHE_DIR"
-          echo "CCACHE_MAXSIZE=3G"
+          echo "CCACHE_MAXSIZE=500M"
           echo "CCACHE_BASEDIR=${GITHUB_WORKSPACE}"
           echo "CCACHE_COMPILERCHECK=content"
           echo "CCACHE_NOHASHDIR=true"
@@ -423,7 +423,7 @@ runs:
         
         ccache -M 3G
         ccache -o compression=true
-        ccache -o compression_level=3
+        ccache -o compression_level=6
         ccache -o direct_mode=true
         ccache -o hash_dir=false
         ccache -o file_clone=true || true
@@ -445,21 +445,22 @@ runs:
         echo ""
         echo "Cache configuration:"
         echo "  Directory: $CACHE_DIR"
-        echo "  Max size: 3G"
-        echo "  Android: ${ANDROID_VER}"
-        echo "  Kernel: ${KERNEL_VER}"
-        echo "  Clang: ${CLANG_VERSION_SHORT}"
+        echo "  Max size: 500M"
         echo "  Model: ${OP_MODEL}"
+        echo "  Android: ${ANDROID_VER}"
+        echo "  Kernel: ${KERNEL_FULL_VER}"
+        echo "  Clang: ${CLANG_VERSION_SHORT}"
         echo "::endgroup::"
 
-    - name: Restore ccache
+    - name: Cache ccache
       uses: actions/cache@v4
       with:
         path: ${{ env.CCACHE_DIR }}
-        key: ccache-suki-v4-${{ env.OP_MODEL }}-${{ env.OP_OS_VERSION }}-${{ env.KERNEL_FULL_VER }}-${{ env.CLANG_VERSION_SHORT }}
+        key: ccache-suki-v4-${{ env.OP_MODEL }}-${{ env.ANDROID_VER }}-${{ env.KERNEL_FULL_VER }}-${{ env.CLANG_VERSION_SHORT }}
         restore-keys: |
-          ccache-suki-v4-${{ env.OP_MODEL }}-${{ env.OP_OS_VERSION }}-${{ env.KERNEL_FULL_VER }}-
-          ccache-suki-v4-${{ env.OP_MODEL }}-${{ env.OP_OS_VERSION }}-          
+          ccache-suki-v4-${{ env.OP_MODEL }}-${{ env.ANDROID_VER }}-${{ env.KERNEL_FULL_VER }}-
+          ccache-suki-v4-${{ env.OP_MODEL }}-${{ env.ANDROID_VER }}-
+          ccache-suki-v4-${{ env.OP_MODEL }}-
 
     - name: Verify ccache
       if: ${{ inputs.clean != 'true' }}
@@ -1229,7 +1230,7 @@ runs:
         echo "Timestamp: $KBUILD_BUILD_TIMESTAMP"
         
         if [ "${{ inputs.clean }}" != "true" ]; then
-          echo "ccache: ENABLED (3G max)"
+          echo "ccache: ENABLED (500M max)"
         else
           echo "ccache: DISABLED"
         fi
