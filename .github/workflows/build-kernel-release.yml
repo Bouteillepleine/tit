@@ -151,55 +151,14 @@ jobs:
           EOF
 
   build:
-      needs: setup
-      runs-on: ubuntu-latest
-      timeout-minutes: 180  # 3-hour timeout
-      strategy:
-        fail-fast: false
-        matrix: ${{ fromJSON(needs.setup.outputs.matrix) }}
-      steps:
+    needs: setup
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.setup.outputs.matrix) }}
+    steps:
       - name: 📥 Checkout repository
         uses: actions/checkout@v4
-      
-      - name: 🧹 Emergency Disk Cleanup
-        run: |
-          echo "::group::Disk Usage Before Cleanup"
-          df -h
-          
-          AVAIL_GB=$(df -BG / | awk 'NR==2 {print $4}' | sed 's/G//')
-          if [ "$AVAIL_GB" -lt 25 ]; then
-            echo "::warning::Low disk space detected: ${AVAIL_GB}GB available"
-            echo "::warning::Build may fail if space runs out"
-          fi
-          echo "::endgroup::"
-          
-          echo "::group::Removing Unnecessary Software"
-          sudo rm -rf /usr/share/dotnet
-          sudo rm -rf /usr/local/lib/android
-          sudo rm -rf /opt/ghc
-          sudo rm -rf /opt/hostedtoolcache/CodeQL
-          sudo apt-get clean
-          
-          if command -v docker >/dev/null 2>&1; then
-            docker rmi $(docker images -q) 2>/dev/null || true
-            sudo systemctl stop docker 2>/dev/null || true
-          fi
-          
-          sudo rm -rf ~/.cache 2>/dev/null || true
-          sudo rm -rf ~/.npm 2>/dev/null || true
-          sudo rm -rf ~/.local/share/Trash 2>/dev/null || true
-          echo "::endgroup::"
-          
-          echo "::group::Disk Usage After Cleanup"
-          df -h
-          AVAIL_GB=$(df -BG / | awk 'NR==2 {print $4}' | sed 's/G//')
-          echo "✅ Available space: ${AVAIL_GB}GB"
-          
-          if [ "$AVAIL_GB" -lt 25 ]; then
-            echo "::error::Insufficient disk space after cleanup: ${AVAIL_GB}GB"
-            exit 1
-          fi
-          echo "::endgroup::"
 
       - name: 🔨 Build ${{ matrix.model }}
         id: build
@@ -242,19 +201,37 @@ jobs:
             if [ -n "${{ steps.build.outputs.warnings_count }}" ]; then
               echo "  - Warnings: ${{ steps.build.outputs.warnings_count }}"
             fi
+            
+            if [ -n "${{ steps.build.outputs.errors_count }}" ]; then
+              echo "  - Errors: ${{ steps.build.outputs.errors_count }}"
+            fi
           else
             echo "❌ Build failed"
           fi
           
           echo "::endgroup::"
 
+      # ✅ FIX: Use correct artifact path from action output
       - name: 📤 Upload kernel artifact
         if: success()
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.model }}-kernel
-          path: ${{ matrix.model }}/artifacts/${{ steps.build.outputs.zip_name }}
+          path: ${{ steps.build.outputs.zip_path }}
           retention-days: 30
+          if-no-files-found: error
+
+      # ✅ FIX: Use dynamic path for metadata
+      - name: 📤 Upload build metadata
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.model }}-metadata
+          path: |
+            ${{ matrix.model }}/kernel_platform/artifacts/build_info.json
+            ${{ matrix.model }}/kernel_platform/artifacts/kernel_version.txt
+          retention-days: 30
+          if-no-files-found: warn
 
       - name: 📝 Job summary
         if: always()
@@ -284,76 +261,16 @@ jobs:
               echo "| **Warnings** | ${{ steps.build.outputs.warnings_count }} |" >> $GITHUB_STEP_SUMMARY
             fi
             
+            if [ -n "${{ steps.build.outputs.errors_count }}" ]; then
+              echo "| **Errors** | ${{ steps.build.outputs.errors_count }} |" >> $GITHUB_STEP_SUMMARY
+            fi
+            
             cat >> $GITHUB_STEP_SUMMARY << EOF
           
           **Artifact:** \`${{ steps.build.outputs.zip_name }}\`  
           **SHA256:** \`${{ steps.build.outputs.zip_sha256 }}\`
           EOF
           fi
-      
-      - name: 🧹 Final cleanup and space report
-        if: always()
-        run: |
-          echo "::group::Final Cleanup"
-          
-          # Show space before cleanup
-          echo "📊 Disk usage before cleanup:"
-          df -h / | grep -E '^Filesystem|/$'
-          BEFORE=$(df -BG / | awk 'NR==2 {print $3}' | sed 's/G//')
-          echo ""
-          
-          # Remove build artifacts but PRESERVE ccache
-          echo "🗑️ Removing temporary build files..."
-          sudo rm -rf "$GITHUB_WORKSPACE/out" || true
-          sudo rm -rf "$GITHUB_WORKSPACE/build" || true
-          sudo rm -rf "$GITHUB_WORKSPACE/kernel/out" || true
-          sudo rm -rf "$GITHUB_WORKSPACE/.repo" || true
-          sudo rm -rf /tmp/* || true
-          sudo rm -rf /var/tmp/* || true
-          
-          echo "✅ Temporary files removed"
-          echo ""
-          
-          # Show ccache stats (don't clear it!) - FIXED VERSION
-          if command -v ccache >/dev/null 2>&1; then
-            echo "📊 ccache statistics after build:"
-            
-            # Get full stats output
-            STATS=$(ccache -s 2>/dev/null || true)
-            
-            if [ -n "$STATS" ]; then
-              # Try to extract key metrics (gracefully handle missing lines)
-              echo "$STATS" | grep -i 'cache size' || true
-              echo "$STATS" | grep -i 'files in cache' || true
-              echo "$STATS" | grep -i 'cache hit rate' || true
-              
-              # Get cache size for preservation message
-              CCACHE_SIZE=$(echo "$STATS" | grep -i 'cache size' | awk '{print $3, $4}' || echo "unknown")
-              echo ""
-              echo "💾 ccache preserved (${CCACHE_SIZE}) for next build"
-            else
-              echo "⚠️ Could not retrieve ccache statistics"
-            fi
-          fi
-          
-          echo ""
-          echo "💽 Final disk usage:"
-          df -h / | grep -E '^Filesystem|/$'
-          
-          AFTER=$(df -BG / | awk 'NR==2 {print $3}' | sed 's/G//')
-          AVAIL_GB=$(df -BG / | awk 'NR==2 {print $4}' | sed 's/G//')
-          FREED=$((BEFORE - AFTER))
-          
-          echo ""
-          echo "✅ Cleanup complete:"
-          echo "   - Freed: ${FREED}GB"
-          echo "   - Available: ${AVAIL_GB}GB"
-          
-          if [ "$AVAIL_GB" -lt 10 ]; then
-            echo "::warning::Low disk space remaining: ${AVAIL_GB}GB"
-          fi
-          
-          echo "::endgroup::"
 
   release:
     if: ${{ inputs.make_release }}
@@ -399,16 +316,29 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: artifacts
+          pattern: '*-kernel'
+
+      - name: 📥 Download metadata
+        uses: actions/download-artifact@v4
+        with:
+          path: metadata
+          pattern: '*-metadata'
 
       - name: 📦 Prepare release assets
         id: prepare
         run: |
           echo "::group::Prepare release"
           
-          mkdir release
+          mkdir -p release
           find artifacts -name "*.zip" -exec cp {} release/ \;
           
           count=$(ls -1 release/*.zip 2>/dev/null | wc -l)
+          
+          if [ "$count" -eq 0 ]; then
+            echo "::error::No kernel ZIPs found in artifacts"
+            exit 1
+          fi
+          
           total_size=$(du -sb release | cut -f1)
           
           echo "📦 Prepared $count kernel(s)"
@@ -417,43 +347,92 @@ jobs:
           echo "count=$count" >> $GITHUB_OUTPUT
           echo "total_size=$total_size" >> $GITHUB_OUTPUT
           
-          cat > notes.md << 'EOF'
+          # ✅ FIX: Use environment variables instead of workflow inputs in heredoc
+          HOOK_TYPE="${{ inputs.hook }}"
+          OPTIMIZE="${{ inputs.optimize_level }}"
+          ZRAM="${{ inputs.enable_zram }}"
+          LSM="${{ inputs.lsm }}"
+          SCHED="${{ inputs.sched }}"
+          CLEAN="${{ inputs.clean_build }}"
+          
+          cat > notes.md << EOF
           # 🚀 SukiSU Ultra with SUSFS v1.5.12
           
           ## 📱 Built Devices
+          
           EOF
           
           for zip in release/*.zip; do
             name=$(basename "$zip" .zip)
             size=$(stat -c%s "$zip")
             size_mb=$(echo "scale=2; $size / 1024 / 1024" | bc)
-            echo "- \`$name\` (${size_mb} MB)" >> notes.md
+            sha256=$(sha256sum "$zip" | awk '{print $1}')
+            
+            device_name=$(echo "$name" | sed 's/SukiSU-Ultra-//' | sed 's/-android.*//')
+            
+            cat >> notes.md << DEVICE
+          ### 📦 $device_name
+          - **File:** \`$name.zip\`
+          - **Size:** ${size_mb} MB
+          - **SHA256:** \`${sha256}\`
+          
+          DEVICE
           done
           
-          cat >> notes.md << 'EOF'
+          cat >> notes.md << EOF
           
           ## ✨ Features
-          - ⚡ **SukiSU Ultra Manager** - Advanced root management
-          - 🛡️ **SUSFS v1.5.12** - Enhanced security and hiding
-          - 🌐 **WireGuard** - Built-in VPN support
-          - 💾 **ZRAM** - Memory compression (optional)
-          - 🔧 **BBG LSM** - Baseband Guard security (optional)
-          - 🚀 **Optimized Build** - O2/O3 compiler optimizations
+          - ⚡ **SukiSU Ultra Manager** - Advanced root management with enhanced UI
+          - 🛡️ **SUSFS v1.5.12** - Enhanced security and hiding capabilities
+          - 🌐 **WireGuard** - Built-in VPN support for secure connections
+          - 💾 **ZRAM** - Memory compression with LZ4K/LZ4KD (optional)
+          - 🔧 **BBG LSM** - Baseband Guard security module (optional)
+          - 🚀 **Compiler Optimizations** - O2/O3 optimizations with LTO
+          - 🎯 **Multiple Hook Types** - kprobe, manual, or tracepoint
+          
+          ## 🔧 Build Configuration
+          - **Hook Type:** ${HOOK_TYPE}
+          - **Optimization:** ${OPTIMIZE}
+          - **ZRAM:** ${ZRAM}
+          - **BBG LSM:** ${LSM}
+          - **Fengchi Scheduler:** ${SCHED}
+          - **Clean Build:** ${CLEAN}
           
           ## 📥 Installation
-          1. Download the ZIP for your device
-          2. Flash with SukiSU Manager or custom recovery
-          3. Reboot and enjoy!
+          1. **Download** the ZIP file for your device from the assets below
+          2. **Verify** the SHA256 checksum (optional but recommended)
+          3. **Flash** using SukiSU Manager or custom recovery (TWRP/OrangeFox)
+          4. **Reboot** your device
+          5. **Enjoy** enhanced root capabilities!
           
-          ## 🔗 Links
+          ## ⚠️ Important Notes
+          - Always backup your data before flashing
+          - Ensure you have a custom recovery installed
+          - Some features may require additional modules
+          - Check device compatibility before flashing
+          
+          ## 🔗 Useful Links
           - [SUSFS Module](https://github.com/sidex15/ksu_module_susfs)
-          - [SukiSU Manager](https://github.com/SukiSU-Ultra/SukiSU-Ultra)
+          - [SukiSU Ultra Manager](https://github.com/SukiSU-Ultra/SukiSU-Ultra)
           - [Report Issues](https://github.com/${{ github.repository }}/issues)
+          - [Documentation](https://github.com/${{ github.repository }}/wiki)
           
-          ## 📊 Build Info
+          ## 📊 Build Information
           - **Built on:** $(date -u '+%Y-%m-%d %H:%M:%S UTC')
           - **Workflow:** ${{ github.workflow }}
           - **Run:** [#${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+          - **Commit:** [\`${{ github.sha }}\`](${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }})
+          
+          ## 💝 Support
+          If you find this project useful, please consider:
+          - ⭐ Starring the repository
+          - 🐛 Reporting bugs and issues
+          - 💬 Joining our community discussions
+          - 📢 Sharing with other OnePlus users
+          
+          ---
+          
+          **Disclaimer:** This is custom kernel software. Flash at your own risk. The developers are not responsible for any damage to your device.
           EOF
           
           echo "::endgroup::"
@@ -463,6 +442,12 @@ jobs:
         run: |
           echo "::group::Create release"
           
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "⚠️ Release $TAG already exists, deleting..."
+            gh release delete "$TAG" --yes || true
+            sleep 2
+          fi
+          
           gh release create "$TAG" \
             --title "🎯 OnePlus Kernels - SukiSU Ultra $TAG" \
             --notes-file notes.md \
@@ -471,6 +456,8 @@ jobs:
           
           echo "✅ Release created: $TAG"
           echo "🔗 URL: ${{ github.server_url }}/${{ github.repository }}/releases/tag/$TAG"
+          
+          echo "release_url=${{ github.server_url }}/${{ github.repository }}/releases/tag/$TAG" >> $GITHUB_OUTPUT
           
           echo "::endgroup::"
 
@@ -483,25 +470,86 @@ jobs:
           
           ## 🎉 Release Created Successfully
           
-          **Tag:** [\`${{ steps.tag.outputs.tag }}\`](${{ github.server_url }}/${{ github.repository }}/releases/tag/${{ steps.tag.outputs.tag }})  
+          **Tag:** [\`${{ steps.tag.outputs.tag }}\`](${{ steps.release.outputs.release_url }})  
           **Kernels:** ${{ steps.prepare.outputs.count }}  
           **Total Size:** $(numfmt --to=iec-i --suffix=B ${{ steps.prepare.outputs.total_size }})
           
-          ### 📦 Assets
+          ### 📦 Released Assets
           EOF
           
           for zip in release/*.zip; do
             name=$(basename "$zip")
             size=$(stat -c%s "$zip")
             size_mb=$(echo "scale=2; $size / 1024 / 1024" | bc)
+            sha256=$(sha256sum "$zip" | awk '{print $1}')
             echo "- \`$name\` (${size_mb} MB)" >> $GITHUB_STEP_SUMMARY
+            echo "  - SHA256: \`${sha256}\`" >> $GITHUB_STEP_SUMMARY
           done
+          
+          cat >> $GITHUB_STEP_SUMMARY << EOF
+          
+          ### 🔗 Quick Links
+          - [📦 Release Page](${{ steps.release.outputs.release_url }})
+          - [📊 Workflow Run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+          - [📝 Commit](${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }})
+          EOF
 
       - name: 🧹 Cleanup on failure
         if: failure()
         run: |
           echo "::group::Cleanup failed release"
+          
           git push origin --delete "$TAG" 2>/dev/null || true
           git tag -d "$TAG" 2>/dev/null || true
+          gh release delete "$TAG" --yes 2>/dev/null || true
+          
           echo "✅ Cleanup completed"
           echo "::endgroup::"
+
+  cleanup:
+    if: always()
+    needs: [build, release]
+    runs-on: ubuntu-latest
+    steps:
+      - name: 🧹 Clean up old artifacts
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const days = 7;
+            const ms = days * 24 * 60 * 60 * 1000;
+            const cutoff = new Date(Date.now() - ms);
+            
+            console.log(`Cleaning artifacts older than ${days} days (before ${cutoff.toISOString()})`);
+            
+            const artifacts = await github.rest.actions.listArtifactsForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              per_page: 100
+            });
+            
+            let deleted = 0;
+            for (const artifact of artifacts.data.artifacts) {
+              const createdAt = new Date(artifact.created_at);
+              if (createdAt < cutoff) {
+                console.log(`Deleting: ${artifact.name} (${artifact.created_at})`);
+                await github.rest.actions.deleteArtifact({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  artifact_id: artifact.id
+                });
+                deleted++;
+              }
+            }
+            
+            console.log(`✅ Deleted ${deleted} old artifact(s)`);
+
+      - name: 📊 Cleanup summary
+        run: |
+          cat >> $GITHUB_STEP_SUMMARY << EOF
+          
+          ---
+          
+          ## 🧹 Cleanup Completed
+          
+          Old artifacts (>7 days) have been automatically removed to save storage space.
+          EOF
