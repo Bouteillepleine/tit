@@ -88,8 +88,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           sparse-checkout: configs/
-
-      # ✅ FIX 1: Ensure required CLI tools
+      
       - name: 🧰 Ensure tools
         run: |
           set -euo pipefail
@@ -152,8 +151,7 @@ jobs:
           echo "count=$count" >> $GITHUB_OUTPUT
           
           echo "::endgroup::"
-
-      # ✅ FIX 2: Use steps.matrix instead of needs.setup
+     
       - name: 📊 Build plan summary
         run: |
           cat >> $GITHUB_STEP_SUMMARY << EOF
@@ -186,8 +184,7 @@ jobs:
     steps:
       - name: 📥 Checkout repository
         uses: actions/checkout@v4
-
-      # ✅ FIX 3: Enhanced disk cleanup with journal vacuum and apt cache purge
+     
       - name: 🧹 Free Up Disk Space
         run: |
           set -euo pipefail
@@ -203,12 +200,10 @@ jobs:
           sudo rm -rf /opt/ghc
           sudo rm -rf /opt/hostedtoolcache/CodeQL
           
-          # Enhanced apt cleanup
+          # Safe apt cleanup (preserves cache for faster builds)
           echo "Cleaning apt..."
-          sudo apt-get clean
           sudo apt-get autoremove -y
           sudo journalctl --vacuum-time=1s >/dev/null 2>&1 || true
-          sudo rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*
           
           # Docker cleanup
           echo "Cleaning Docker..."
@@ -225,6 +220,7 @@ jobs:
           
           AVAIL_GB=$(df -BG / | awk 'NR==2 {print $4}' | sed 's/G//')
           echo "✅ Available space: ${AVAIL_GB}GB"
+          echo "ℹ️  APT cache (~250MB) preserved for faster builds"
           
           if [ "$AVAIL_GB" -lt 30 ]; then
             echo "::error::Insufficient disk space: ${AVAIL_GB}GB (need 30GB+)"
@@ -232,8 +228,7 @@ jobs:
           fi
           
           echo "::endgroup::"
-
-      # ✅ FIX 4: Swap step with symmetry and immutable-attr handling
+      
       - name: 🔧 Create and Enable 3GB Swap
         shell: bash
         run: |
