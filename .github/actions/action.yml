@@ -1314,9 +1314,8 @@ runs:
         
         echo "::endgroup::"
 
-    - name: Collect Build Statistics
+    - name: Collect build statistics
       id: collect_stats
-      if: success()
       shell: bash
       run: |
         set -euo pipefail
@@ -1334,31 +1333,34 @@ runs:
         IMAGE_SIZE=$(stat -c%s "$IMG")
         IMAGE_SIZE_MB=$(awk -v s="$IMAGE_SIZE" 'BEGIN{printf "%.2f", s/1024/1024}')
         
-        echo "image_sha256=$IMAGE_SHA256" >> "$GITHUB_OUTPUT"
-        echo "image_size=$IMAGE_SIZE" >> "$GITHUB_OUTPUT"
-        echo "image_size_mb=${IMAGE_SIZE_MB}" >> "$GITHUB_OUTPUT"
-        echo "build_time=${BUILD_TIME}" >> "$GITHUB_OUTPUT"
-        
+        # Count warnings/errors from build log
+        WARNINGS=0
+        ERRORS=0
         if [ -f "$KERNEL_PATH/common/build.log" ]; then
-          WARNINGS=$(grep -c "warning:" "$KERNEL_PATH/common/build.log" || echo "0")
-          ERRORS=$(grep -c "error:" "$KERNEL_PATH/common/build.log" || echo "0")
-        else
-          WARNINGS=0
-          ERRORS=0
+          WARNINGS=$(grep -c "warning:" "$KERNEL_PATH/common/build.log" 2>/dev/null || echo "0")
+          ERRORS=$(grep -c "error:" "$KERNEL_PATH/common/build.log" 2>/dev/null || echo "0")
         fi
         
-        echo "warnings_count=$WARNINGS" >> "$GITHUB_OUTPUT"
-        echo "errors_count=$ERRORS" >> "$GITHUB_OUTPUT"
+        # Write all outputs in one block
+        {
+          echo "image_sha256=${IMAGE_SHA256}"
+          echo "image_size=${IMAGE_SIZE}"
+          echo "image_size_mb=${IMAGE_SIZE_MB}"
+          echo "build_time=${BUILD_TIME}"
+          echo "warnings_count=${WARNINGS}"
+          echo "errors_count=${ERRORS}"
+        } >> "$GITHUB_OUTPUT"
         
+        # ✅ Display summary (properly formatted)
         echo "📊 Build Statistics:"
-        echo "   Image SHA256: $IMAGE_SHA256"
+        echo "   Image SHA256: ${IMAGE_SHA256}"
         echo "   Image Size: ${IMAGE_SIZE_MB} MB"
         echo "   Build Time: $((BUILD_TIME / 60))m $((BUILD_TIME % 60))s"
-        echo "   Warnings: $WARNINGS"
-        echo "   Errors: $ERRORS"
+        echo "   Compiler Warnings: ${WARNINGS}"
+        echo "   Build Errors: ${ERRORS}"
         
         echo "::endgroup::"
-
+    
     - name: Download and Package ZRAM Module
       id: zram_module
       if: ${{ inputs.enable_zram == 'true' }}
@@ -1367,14 +1369,14 @@ runs:
       run: |
         set -euo pipefail
         echo "::group::Download ZRAM module"
-        
+            
         mkdir -p "${ARTIFACTS_DIR}"
-        
+            
         KERNEL_VER="${{ env.KERNEL_VER }}"
         ANDROID_VER="${{ env.ANDROID_VER }}"
-        
+            
         ZRAM_BASE_URL="https://github.com/Numbersf/Action-Build/releases/download/zram-modules"
-        
+            
         case "$KERNEL_VER" in
           5.10)
             download_url="$ZRAM_BASE_URL/zram-${ANDROID_VER}-5.10.tar.gz"
@@ -1395,9 +1397,9 @@ runs:
             exit 0
             ;;
         esac
-        
+            
         echo "Downloading ZRAM module from: $download_url"
-        
+          
         success=0
         if [ -n "$download_url" ]; then
           if wget -N "$download_url" -O "${ARTIFACTS_DIR}/zram-module.tar.gz" 2>&1 | tee /tmp/wget.log; then
@@ -1411,18 +1413,18 @@ runs:
                 echo "::warning::Failed to extract ZRAM module"
               fi
             fi
-          else
+           else
             echo "::warning::wget failed for $download_url"
             cat /tmp/wget.log || true
           fi
         fi
-        
+            
         if [ "$success" = "1" ]; then
           echo "zram_available=true" >> "$GITHUB_OUTPUT"
         else
           echo "zram_available=false" >> "$GITHUB_OUTPUT"
         fi
-        
+            
         echo "::endgroup::"
 
     - name: Create Flashable ZIP
