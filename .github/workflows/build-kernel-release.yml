@@ -198,7 +198,6 @@ jobs:
               echo "  - ccache hit rate: ${{ steps.build.outputs.ccache_hit_rate }}"
             fi
             
-            # ✅ NEW: Show errors count
             if [ -n "${{ steps.build.outputs.warnings_count }}" ]; then
               echo "  - Warnings: ${{ steps.build.outputs.warnings_count }}"
             fi
@@ -212,17 +211,17 @@ jobs:
           
           echo "::endgroup::"
 
-      # ✅ FIX: Use ARTIFACTS_DIR path from action
+      # ✅ FIX: Use correct artifact path from action output
       - name: 📤 Upload kernel artifact
         if: success()
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.model }}-kernel
-          path: ${{ matrix.model }}/kernel_platform/artifacts/${{ steps.build.outputs.zip_name }}
+          path: ${{ steps.build.outputs.zip_path }}
           retention-days: 30
           if-no-files-found: error
 
-      # ✅ NEW: Upload build metadata
+      # ✅ FIX: Use dynamic path for metadata
       - name: 📤 Upload build metadata
         if: success()
         uses: actions/upload-artifact@v4
@@ -262,7 +261,6 @@ jobs:
               echo "| **Warnings** | ${{ steps.build.outputs.warnings_count }} |" >> $GITHUB_STEP_SUMMARY
             fi
             
-            # ✅ NEW: Show errors in summary
             if [ -n "${{ steps.build.outputs.errors_count }}" ]; then
               echo "| **Errors** | ${{ steps.build.outputs.errors_count }} |" >> $GITHUB_STEP_SUMMARY
             fi
@@ -320,7 +318,6 @@ jobs:
           path: artifacts
           pattern: '*-kernel'
 
-      # ✅ NEW: Download metadata artifacts
       - name: 📥 Download metadata
         uses: actions/download-artifact@v4
         with:
@@ -350,8 +347,15 @@ jobs:
           echo "count=$count" >> $GITHUB_OUTPUT
           echo "total_size=$total_size" >> $GITHUB_OUTPUT
           
-          # ✅ IMPROVED: Generate detailed release notes with metadata
-          cat > notes.md << 'EOF'
+          # ✅ FIX: Use environment variables instead of workflow inputs in heredoc
+          HOOK_TYPE="${{ inputs.hook }}"
+          OPTIMIZE="${{ inputs.optimize_level }}"
+          ZRAM="${{ inputs.enable_zram }}"
+          LSM="${{ inputs.lsm }}"
+          SCHED="${{ inputs.sched }}"
+          CLEAN="${{ inputs.clean_build }}"
+          
+          cat > notes.md << EOF
           # 🚀 SukiSU Ultra with SUSFS v1.5.12
           
           ## 📱 Built Devices
@@ -364,7 +368,6 @@ jobs:
             size_mb=$(echo "scale=2; $size / 1024 / 1024" | bc)
             sha256=$(sha256sum "$zip" | awk '{print $1}')
             
-            # Try to extract device info from metadata
             device_name=$(echo "$name" | sed 's/SukiSU-Ultra-//' | sed 's/-android.*//')
             
             cat >> notes.md << DEVICE
@@ -376,7 +379,7 @@ jobs:
           DEVICE
           done
           
-          cat >> notes.md << 'EOF'
+          cat >> notes.md << EOF
           
           ## ✨ Features
           - ⚡ **SukiSU Ultra Manager** - Advanced root management with enhanced UI
@@ -388,12 +391,12 @@ jobs:
           - 🎯 **Multiple Hook Types** - kprobe, manual, or tracepoint
           
           ## 🔧 Build Configuration
-          - **Hook Type:** ${{ inputs.hook }}
-          - **Optimization:** ${{ inputs.optimize_level }}
-          - **ZRAM:** ${{ inputs.enable_zram }}
-          - **BBG LSM:** ${{ inputs.lsm }}
-          - **Fengchi Scheduler:** ${{ inputs.sched }}
-          - **Clean Build:** ${{ inputs.clean_build }}
+          - **Hook Type:** ${HOOK_TYPE}
+          - **Optimization:** ${OPTIMIZE}
+          - **ZRAM:** ${ZRAM}
+          - **BBG LSM:** ${LSM}
+          - **Fengchi Scheduler:** ${SCHED}
+          - **Clean Build:** ${CLEAN}
           
           ## 📥 Installation
           1. **Download** the ZIP file for your device from the assets below
@@ -439,10 +442,10 @@ jobs:
         run: |
           echo "::group::Create release"
           
-          # ✅ FIX: Better error handling for release creation
           if gh release view "$TAG" >/dev/null 2>&1; then
             echo "⚠️ Release $TAG already exists, deleting..."
             gh release delete "$TAG" --yes || true
+            sleep 2
           fi
           
           gh release create "$TAG" \
@@ -496,19 +499,13 @@ jobs:
         run: |
           echo "::group::Cleanup failed release"
           
-          # Delete remote tag
           git push origin --delete "$TAG" 2>/dev/null || true
-          
-          # Delete local tag
           git tag -d "$TAG" 2>/dev/null || true
-          
-          # Delete release if it was created
           gh release delete "$TAG" --yes 2>/dev/null || true
           
           echo "✅ Cleanup completed"
           echo "::endgroup::"
 
-  # ✅ NEW: Post-build cleanup job
   cleanup:
     if: always()
     needs: [build, release]
