@@ -596,22 +596,32 @@ runs:
         KERNEL_VER="${KERNEL_VER:-}"
         
         # ============================================
-        # Extract clang version from build.config
+        # Extract clang version from build.config (ROBUST)
         # ============================================
         BUILD_CONFIG="${GITHUB_WORKSPACE}/${{ env.CONFIG }}/kernel_platform/common/build.config.constants"
         
         if [ -f "$BUILD_CONFIG" ]; then
           echo "Reading clang version from build.config..."
           
-          # Extract CLANG_VERSION (e.g., "clang-r487747c" or "r487747c")
-          CLANG_FROM_CONFIG=$(grep -oP 'CLANG_VERSION=\K[^"]+' "$BUILD_CONFIG" 2>/dev/null | head -1 || true)
+          # ✅ Robust awk extraction: handles quotes, whitespace, and prefix
+          CLANG_FROM_CONFIG="$(awk -F= '
+            /^CLANG_VERSION=/ {
+              val = $2
+              # Strip leading/trailing whitespace
+              gsub(/^[[:space:]]+|[[:space:]]+$/, "", val)
+              # Strip surrounding quotes (single or double)
+              gsub(/^"|"$/, "", val)
+              gsub(/^'\''|'\''$/, "", val)
+              # Remove clang- prefix if present
+              gsub(/^clang-/, "", val)
+              print val
+              exit
+            }
+          ' "$BUILD_CONFIG" || true)"
           
           if [ -n "$CLANG_FROM_CONFIG" ]; then
-            # Normalize: remove "clang-" prefix if present
-            CLANG_FROM_CONFIG="${CLANG_FROM_CONFIG#clang-}"
             echo "  Found in config: $CLANG_FROM_CONFIG"
             
-            # Use config value if CLANG_VERSION_SHORT is still empty
             if [ -z "$CLANG_VERSION_SHORT" ]; then
               CLANG_VERSION_SHORT="$CLANG_FROM_CONFIG"
               echo "  Using config value: $CLANG_VERSION_SHORT"
@@ -641,6 +651,18 @@ runs:
         fi
         
         # ============================================
+        # ✅ NEW: Validate format before normalization
+        # ============================================
+        if [ -n "$CLANG_VERSION_SHORT" ]; then
+          if ! [[ "$CLANG_VERSION_SHORT" =~ ^r[0-9]+[a-z]*$ ]]; then
+            echo "  ⚠️  Invalid CLANG_VERSION_SHORT format: '$CLANG_VERSION_SHORT'"
+            echo "      Expected format: r<digits>[letters] (e.g., r510928, r487747c)"
+            echo "      Falling back to default..."
+            CLANG_VERSION_SHORT=""
+          fi
+        fi
+        
+        # ============================================
         # Final fallback: Use default
         # ============================================
         if [ -z "$CLANG_VERSION_SHORT" ]; then
@@ -649,29 +671,70 @@ runs:
         fi
         
         # ============================================
+        # ✅ Normalize to reduce key fragmentation
+        # ============================================
+        echo ""
+        echo "🔧 Normalizing clang version for cache deduplication..."
+        ORIGINAL_VERSION="$CLANG_VERSION_SHORT"
+        
+        case "$CLANG_VERSION_SHORT" in
+          r510928*)
+            CLANG_VERSION_SHORT="r510928"
+            echo "  Normalized: $ORIGINAL_VERSION → $CLANG_VERSION_SHORT"
+            ;;
+          r487747*)
+            CLANG_VERSION_SHORT="r487747c"
+            echo "  Normalized: $ORIGINAL_VERSION → $CLANG_VERSION_SHORT"
+            ;;
+          r475365*)
+            CLANG_VERSION_SHORT="r475365"
+            echo "  Normalized: $ORIGINAL_VERSION → $CLANG_VERSION_SHORT"
+            ;;
+          r450784*)
+            CLANG_VERSION_SHORT="r450784d"
+            echo "  Normalized: $ORIGINAL_VERSION → $CLANG_VERSION_SHORT"
+            ;;
+          *)
+            echo "  ℹ️  No normalization needed: $CLANG_VERSION_SHORT"
+            ;;
+        esac
+        
+        # ============================================
         # Export to environment
         # ============================================
         echo "CLANG_VERSION_SHORT=$CLANG_VERSION_SHORT" >> "$GITHUB_ENV"
         
         # ============================================
-        # Configure ccache
+        # Configure ccache (larger size for better hits)
         # ============================================
         echo "CCACHE_DIR=$HOME/.ccache" >> "$GITHUB_ENV"
         echo "CCACHE_BASEDIR=${GITHUB_WORKSPACE}" >> "$GITHUB_ENV"
-        echo "CCACHE_MAXSIZE=3G" >> "$GITHUB_ENV"
-        
-        # Optional: Device-specific isolation (uncomment if needed)
-        # DEVICE_HASH=$(echo -n "${OP_MODEL}-${OP_SOC}" | sha256sum | cut -c1-8)
-        # echo "DEVICE_HASH=$DEVICE_HASH" >> "$GITHUB_ENV"
+        echo "CCACHE_MAXSIZE=5G" >> "$GITHUB_ENV"
+        echo "CCACHE_COMPRESS=true" >> "$GITHUB_ENV"
+        echo "CCACHE_COMPRESSLEVEL=6" >> "$GITHUB_ENV"
         
         echo ""
         echo "📦 Cache configuration:"
         echo "  Clang version: $CLANG_VERSION_SHORT"
+        if [ "$ORIGINAL_VERSION" != "$CLANG_VERSION_SHORT" ]; then
+          echo "    (normalized from: $ORIGINAL_VERSION)"
+        fi
         echo "  Android: ${ANDROID_VER:-<will be set later>}"
         echo "  Kernel: ${KERNEL_VER:-<will be set later>}"
-        echo "  CCACHE_DIR: $HOME/.ccache"
-        echo "  BaseDir: ${GITHUB_WORKSPACE}"
-        echo "  Max size: 3G"
+        echo ""
+        echo "  CCACHE settings:"
+        echo "    Directory: $HOME/.ccache"
+        echo "    Base dir: ${GITHUB_WORKSPACE}"
+        echo "    Max size: 5G (increased for better hit rates)"
+        echo "    Compression: enabled (level 6)"
+        echo ""
+        echo "💡 Cache sharing scope:"
+        echo "  All devices using clang-${CLANG_VERSION_SHORT}* will share this toolchain cache"
+        echo "  Expected benefit: Reduced cache entries, better hit rates, faster cold starts"
+        echo ""
+        echo "🎯 Cache strategy:"
+        echo "  Toolchain: Restore-only (shared, immutable)"
+        echo "  ccache: Save always (device-specific, incremental)"
         echo "::endgroup::"
 
     - name: Ensure ccache is available
