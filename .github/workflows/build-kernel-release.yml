@@ -184,51 +184,7 @@ jobs:
     steps:
       - name: 📥 Checkout repository
         uses: actions/checkout@v4
-     
-      - name: 🧹 Free Up Disk Space
-        run: |
-          set -euo pipefail
-          echo "::group::Disk cleanup"
-          
-          echo "Before cleanup:"
-          df -h / | awk 'NR==2 {printf "Used: %s / %s (%s)\n", $3, $2, $5}'
-          
-          # Remove unnecessary software
-          echo "Removing unnecessary packages..."
-          sudo rm -rf /usr/share/dotnet
-          sudo rm -rf /usr/local/lib/android
-          sudo rm -rf /opt/ghc
-          sudo rm -rf /opt/hostedtoolcache/CodeQL
-          
-          # Safe apt cleanup (preserves cache for faster builds)
-          echo "Cleaning apt..."
-          sudo apt-get autoremove -y
-          sudo journalctl --vacuum-time=1s >/dev/null 2>&1 || true
-          
-          # Docker cleanup
-          echo "Cleaning Docker..."
-          docker system prune -af 2>/dev/null || true
-          sudo systemctl stop docker 2>/dev/null || true
-          
-          # User caches
-          echo "Cleaning user caches..."
-          rm -rf ~/.cache ~/.npm ~/.local/share/Trash 2>/dev/null || true
-          
-          echo ""
-          echo "After cleanup:"
-          df -h / | awk 'NR==2 {printf "Used: %s / %s (%s)\n", $3, $2, $5}'
-          
-          AVAIL_GB=$(df -BG / | awk 'NR==2 {print $4}' | sed 's/G//')
-          echo "✅ Available space: ${AVAIL_GB}GB"
-          echo "ℹ️  APT cache (~250MB) preserved for faster builds"
-          
-          if [ "$AVAIL_GB" -lt 30 ]; then
-            echo "::error::Insufficient disk space: ${AVAIL_GB}GB (need 30GB+)"
-            exit 1
-          fi
-          
-          echo "::endgroup::"
-      
+               
       - name: 🔧 Create and Enable 3GB Swap
         shell: bash
         run: |
