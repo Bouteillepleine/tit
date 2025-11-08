@@ -525,9 +525,6 @@ runs:
         echo "::group::Detect Clang"
         KP="$GITHUB_WORKSPACE/$CONFIG/kernel_platform"
         
-        # Initialize to satisfy set -u
-        CLANG_BIN_PATH=""
-        
         CLANG_FOUND=false
         CLANG_BIN=""
         
@@ -552,12 +549,27 @@ runs:
         CLANG_BIN_PATH="$CLANG_BIN"
         echo "CLANG_BIN_PATH=$CLANG_BIN_PATH" >> "$GITHUB_ENV"
         
-        # ✅ Deferred PATH expansion (prevents duplication)
-        echo "PATH=${CLANG_BIN_PATH}:\$PATH" >> "$GITHUB_ENV"
-        
+        # ✅ Extract version info
         CLANG_VERSION="$("$CLANG_BIN_PATH/clang" --version | head -n1)"
         echo "CLANG_VERSION=$CLANG_VERSION" >> "$GITHUB_ENV"
+        
+        # ✅ Normalize version for cache keys (keep detected variant)
+        detected_short=$(basename "$(dirname "$CLANG_BIN_PATH")" | sed 's/^clang-//')
+        echo "CLANG_VERSION_SHORT_DETECTED=$detected_short" >> "$GITHUB_ENV"
+        
+        # ✅ Family normalization for cache (don't force downgrade)
+        case "$detected_short" in
+          r510928*) family="r510928" ;;
+          r487747*) family="r487747c" ;;
+          r475365*) family="r475365" ;;
+          r450784*) family="r450784" ;;
+          *) family="$detected_short" ;;
+        esac
+        echo "CLANG_VERSION_SHORT=$family" >> "$GITHUB_ENV"
+        
         echo "✅ Detected Clang: $CLANG_VERSION"
+        echo "   Path: $CLANG_BIN_PATH"
+        echo "   Version: $detected_short (family: $family)"
         echo "::endgroup::"
 
     - name: Normalize CLANG_VERSION_SHORT from detected path
@@ -683,7 +695,7 @@ runs:
             echo "  Normalized: $ORIGINAL_VERSION → $CLANG_VERSION_SHORT"
             ;;
           r450784*)
-            CLANG_VERSION_SHORT="r450784d"
+            CLANG_VERSION_SHORT="r450784"
             echo "  Normalized: $ORIGINAL_VERSION → $CLANG_VERSION_SHORT"
             ;;
           *)
@@ -717,7 +729,8 @@ runs:
         echo "    Compression: zstd level 3"
         echo ""
         echo "💡 Cache sharing scope:"
-        echo "  All devices using clang-${CLANG_VERSION_SHORT}* will share this toolchain cache"
+        echo "  All devices with ${ANDROID_VER:-<version>}-${KERNEL_VER:-<version>} + clang-${CLANG_VERSION_SHORT}"
+        echo "  will share this cache for maximum efficiency"
         echo "::endgroup::"
 
     - name: Ensure ccache is available
@@ -1849,35 +1862,55 @@ runs:
         echo "::endgroup::"
         
     - name: On failure - Summarize last error
-      if: ${{ failure() }}
+      if: failure() && always()
       shell: bash
       run: |
         set +e
         echo "::group::Build Failure Analysis"
         
-        # ✅ Guard CONFIG before using
-        if [ -z "${CONFIG:-}" ]; then
-          echo "## 🔴 Build Failed - CONFIG not set" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "Build failed before device configuration was established." >> "$GITHUB_STEP_SUMMARY"
-          echo "::endgroup::"
-          exit 0
-        fi
-        
-        COMMON="$GITHUB_WORKSPACE/$CONFIG/kernel_platform/common"
-        
-        echo "## 🔴 Build Failed - Last 120 Lines" >> "$GITHUB_STEP_SUMMARY"
-        echo "" >> "$GITHUB_STEP_SUMMARY"
-        echo '```' >> "$GITHUB_STEP_SUMMARY"
-        
-        if [ -f "$COMMON/build.log" ]; then
-          tail -n 120 "$COMMON/build.log" >> "$GITHUB_STEP_SUMMARY"
+        # ✅ Resolve COMMON safely with fallbacks
+        if [ -n "${CONFIG:-}" ] && [ -d "$GITHUB_WORKSPACE/$CONFIG/kernel_platform/common" ]; then
+          COMMON="$GITHUB_WORKSPACE/$CONFIG/kernel_platform/common"
+        elif [ -n "${CONFIG:-}" ] && [ -d "$GITHUB_WORKSPACE/$CONFIG/kernel_platform/msm-kernel" ]; then
+          COMMON="$GITHUB_WORKSPACE/$CONFIG/kernel_platform/msm-kernel"
         else
-          echo "build.log not available (file not found at: $COMMON/build.log)" >> "$GITHUB_STEP_SUMMARY"
+          COMMON=""
         fi
         
-        echo '```' >> "$GITHUB_STEP_SUMMARY"
-        echo "::endgroup::"    
+        {
+          echo "## 🔴 Build Failed - Last 120 Lines"
+          echo ""
+          echo '```'
+          if [ -n "$COMMON" ] && [ -f "$COMMON/build.log" ]; then
+            tail -n 120 "$COMMON/build.log"
+          else
+            echo "build.log not available (COMMON='$COMMON')"
+          fi
+          echo '```'
+          echo ""
+          echo "### 📋 Build Context"
+          echo "- **Device:** ${OP_MODEL:-unknown}"
+          echo "- **SoC:** ${OP_SOC:-unknown}"
+          echo "- **Branch:** ${OP_BRANCH:-unknown}"
+          echo "- **Manifest:** ${OP_MANIFEST:-unknown}"
+          echo "- **GKI:** ${ANDROID_VER:-unknown}-${KERNEL_VER:-unknown}"
+          echo "- **Clang:** ${CLANG_VERSION:-unknown}"
+          echo "- **Clang Path:** \`${CLANG_BIN_PATH:-unknown}\`"
+          echo ""
+          echo "### 🔍 Diagnostic Info"
+          if [ -n "$COMMON" ]; then
+            echo "- **Build directory:** \`$COMMON\`"
+            if [ -f "$COMMON/build.log" ]; then
+              # ✅ FIXED: Linux-first stat command
+              LOG_SIZE=$(stat -c%s "$COMMON/build.log" 2>/dev/null || stat -f%z "$COMMON/build.log" 2>/dev/null || echo "unknown")
+              echo "- **Log size:** $LOG_SIZE bytes"
+            fi
+          fi
+          echo "- **Workflow:** $GITHUB_WORKFLOW"
+          echo "- **Run:** [#$GITHUB_RUN_NUMBER]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID)"
+        } >> "$GITHUB_STEP_SUMMARY"
+        
+        echo "::endgroup::"
    
     - name: Save Build Metadata
       id: save_metadata
@@ -2203,6 +2236,29 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
+        
+        # ✅ FIXED: Correct step output references
+        KERNEL_V="${{ steps.save_metadata.outputs.kernel_version }}"
+        SUKISU_V="${{ steps.save_metadata.outputs.sukisu_version }}"
+        SUSFS_V="${{ steps.save_metadata.outputs.susfs_version }}"
+        IMG_SHA="${{ steps.collect_stats.outputs.image_sha256 }}"
+        BTIME="${{ steps.collect_stats.outputs.build_time }}"
+        WARN="${{ steps.collect_stats.outputs.warnings_count }}"
+        
+        # ✅ FIXED: Changed from steps.package to steps.create_zip
+        ZIP_NAME="${{ steps.create_zip.outputs.zip_name }}"
+        ZIP_SIZE="${{ steps.create_zip.outputs.zip_size }}"
+        ZIP_SHA="${{ steps.create_zip.outputs.zip_sha256 }}"
+        
+        CACHE_HIT="${{ steps.cache_restore.outputs.cache-hit }}"
+        
+        # ✅ FIXED: Changed from steps.cache_clang to steps.cache_toolchain
+        TOOLS_HIT="${{ steps.cache_toolchain.outputs.cache-hit }}"
+        
+        # ✅ FIXED: Changed from steps.collect_stats to steps.ccache_stats
+        HIT_RATE="${{ steps.ccache_stats.outputs.hit_rate }}"
+        DIRECT_RATE="${{ steps.ccache_stats.outputs.direct_rate }}"
+        
         echo "## 🎯 Build Summary" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
         
@@ -2211,9 +2267,11 @@ runs:
         echo "|-----------|---------|" >> $GITHUB_STEP_SUMMARY
         echo "| **Device** | ${OP_MODEL} |" >> $GITHUB_STEP_SUMMARY
         echo "| **SoC** | ${OP_SOC} |" >> $GITHUB_STEP_SUMMARY
-        echo "| **Kernel** | ${{ steps.save_metadata.outputs.kernel_version }} |" >> $GITHUB_STEP_SUMMARY
-        echo "| **SukiSU** | v${{ steps.save_metadata.outputs.sukisu_version }} |" >> $GITHUB_STEP_SUMMARY
-        echo "| **SUSFS** | ${{ steps.save_metadata.outputs.susfs_version }} |" >> $GITHUB_STEP_SUMMARY
+        echo "| **Kernel** | ${KERNEL_V:-not produced} |" >> $GITHUB_STEP_SUMMARY
+        echo "| **SukiSU** | v${SUKISU_V:-not produced} |" >> $GITHUB_STEP_SUMMARY
+        echo "| **SUSFS** | ${SUSFS_V:-not produced} |" >> $GITHUB_STEP_SUMMARY
+        
+        # ✅ FIXED: Correct input names
         echo "| **Hook Type** | ${{ inputs.hook }} |" >> $GITHUB_STEP_SUMMARY
         echo "| **Optimization** | ${{ inputs.optimize_level }} |" >> $GITHUB_STEP_SUMMARY
         echo "| **ZRAM** | ${{ inputs.enable_zram }} |" >> $GITHUB_STEP_SUMMARY
@@ -2221,46 +2279,48 @@ runs:
         echo "| **Fengchi** | ${{ inputs.sched }} |" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
         
-        if [ -n "${{ steps.create_zip.outputs.zip_name }}" ]; then
+        # ✅ Only show download section if ZIP was created
+        if [ -n "${ZIP_NAME}" ]; then
           echo "### 📥 Download" >> $GITHUB_STEP_SUMMARY
-          echo "**Filename:** \`${{ steps.create_zip.outputs.zip_name }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Filename:** \`${ZIP_NAME}\`" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           
-          if [ -n "${ZIP_SIZE:-}" ]; then
-            SIZE_MB=$(echo "scale=2; ${ZIP_SIZE} / 1024 / 1024" | bc)
+          if [ -n "${ZIP_SIZE}" ] && [ "${ZIP_SIZE}" -gt 0 ] 2>/dev/null; then
+            SIZE_MB=$(echo "scale=2; ${ZIP_SIZE} / 1024 / 1024" | bc 2>/dev/null || echo "unknown")
             echo "**Size:** ${SIZE_MB} MB" >> $GITHUB_STEP_SUMMARY
           fi
           
-          if [ -n "${ZIP_SHA256:-}" ]; then
+          if [ -n "${ZIP_SHA}" ]; then
             echo "" >> $GITHUB_STEP_SUMMARY
-            echo "**SHA256:** \`${ZIP_SHA256}\`" >> $GITHUB_STEP_SUMMARY
+            echo "**SHA256:** \`${ZIP_SHA}\`" >> $GITHUB_STEP_SUMMARY
           fi
+          echo "" >> $GITHUB_STEP_SUMMARY
         fi
         
-        echo "" >> $GITHUB_STEP_SUMMARY
         echo "### 📊 Build Statistics" >> $GITHUB_STEP_SUMMARY
         
-        if [ -n "${{ steps.collect_stats.outputs.build_time }}" ]; then
-          BUILD_TIME="${{ steps.collect_stats.outputs.build_time }}"
-          BUILD_MIN=$((BUILD_TIME / 60))
-          BUILD_SEC=$((BUILD_TIME % 60))
+        # ✅ Guard numeric operations
+        if [ -n "${BTIME}" ] && [ "${BTIME}" -gt 0 ] 2>/dev/null; then
+          BUILD_MIN=$((BTIME / 60))
+          BUILD_SEC=$((BTIME % 60))
           echo "- **Build Time:** ${BUILD_MIN}m ${BUILD_SEC}s" >> $GITHUB_STEP_SUMMARY
         fi
         
-        if [ -n "${{ steps.collect_stats.outputs.warnings_count }}" ]; then
-          echo "- **Warnings:** ${{ steps.collect_stats.outputs.warnings_count }}" >> $GITHUB_STEP_SUMMARY
+        if [ -n "${WARN}" ]; then
+          echo "- **Warnings:** ${WARN}" >> $GITHUB_STEP_SUMMARY
         fi
         
         if [ -n "${CLANG_VERSION:-}" ]; then
           echo "- **Compiler:** ${CLANG_VERSION}" >> $GITHUB_STEP_SUMMARY
         fi
         
-        if [ -n "${{ steps.collect_stats.outputs.image_sha256 }}" ]; then
-          echo "- **Image SHA256:** \`${{ steps.collect_stats.outputs.image_sha256 }}\`" >> $GITHUB_STEP_SUMMARY
+        if [ -n "${IMG_SHA}" ]; then
+          echo "- **Image SHA256:** \`${IMG_SHA}\`" >> $GITHUB_STEP_SUMMARY
         fi
         
         echo "" >> $GITHUB_STEP_SUMMARY
         
+        # ✅ FIXED: Changed from steps.check_zram to steps.zram_find
         if [ "${{ inputs.enable_zram }}" = "true" ]; then
           echo "### 🔧 ZRAM Module" >> $GITHUB_STEP_SUMMARY
           if [ "${{ steps.zram_find.outputs.upload }}" = "true" ]; then
@@ -2271,28 +2331,29 @@ runs:
           fi
           echo "" >> $GITHUB_STEP_SUMMARY
         fi
-
+        
+        # ✅ Cache performance (only if not clean build)
         if [ "${{ inputs.clean }}" != "true" ]; then
           echo "### 🚀 Cache Performance" >> $GITHUB_STEP_SUMMARY
           
-          if [ -n "${{ steps.ccache_stats.outputs.hit_rate }}" ]; then
-            HIT_RATE="${{ steps.ccache_stats.outputs.hit_rate }}"
-            DIRECT_RATE="${{ steps.ccache_stats.outputs.direct_rate }}"
-            
+          if [ -n "${HIT_RATE}" ] && [ -n "${DIRECT_RATE}" ]; then
             echo "- **Hit Rate:** ${HIT_RATE}%" >> $GITHUB_STEP_SUMMARY
             echo "- **Direct Rate:** ${DIRECT_RATE}%" >> $GITHUB_STEP_SUMMARY
             
-            if (( $(echo "$HIT_RATE > 80" | bc -l) )); then
-              echo "- **Status:** 🔥 Excellent" >> $GITHUB_STEP_SUMMARY
-            elif (( $(echo "$HIT_RATE > 50" | bc -l) )); then
-              echo "- **Status:** ✅ Good" >> $GITHUB_STEP_SUMMARY
-            elif (( $(echo "$HIT_RATE > 20" | bc -l) )); then
-              echo "- **Status:** ⚡ Fair" >> $GITHUB_STEP_SUMMARY
-            else
-              echo "- **Status:** ❄️ Cold cache" >> $GITHUB_STEP_SUMMARY
+            # ✅ Guard float comparison
+            if command -v bc >/dev/null 2>&1; then
+              if (( $(echo "${HIT_RATE} > 80" | bc -l 2>/dev/null || echo 0) )); then
+                echo "- **Status:** 🔥 Excellent" >> $GITHUB_STEP_SUMMARY
+              elif (( $(echo "${HIT_RATE} > 50" | bc -l 2>/dev/null || echo 0) )); then
+                echo "- **Status:** ✅ Good" >> $GITHUB_STEP_SUMMARY
+              elif (( $(echo "${HIT_RATE} > 20" | bc -l 2>/dev/null || echo 0) )); then
+                echo "- **Status:** ⚡ Fair" >> $GITHUB_STEP_SUMMARY
+              else
+                echo "- **Status:** ❄️ Cold cache" >> $GITHUB_STEP_SUMMARY
+              fi
             fi
             
-            if [ "${{ steps.cache_toolchain.outputs.cache-hit }}" = "true" ]; then
+            if [ "${TOOLS_HIT}" = "true" ]; then
               echo "- **Toolchain:** ✅ Cached" >> $GITHUB_STEP_SUMMARY
             else
               echo "- **Toolchain:** 📥 Downloaded" >> $GITHUB_STEP_SUMMARY
