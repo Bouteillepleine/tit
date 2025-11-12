@@ -472,7 +472,6 @@ runs:
         echo "   Fingerprint: ${CLANG_VERSION_SHORT}"
         echo "::endgroup::"
        
-    # ✅ OPTIMIZATION 2: Increased ccache to 8GB with compression level 6
     - name: Setup ccache (shared across 27 models)
       shell: bash
       run: |
@@ -482,7 +481,7 @@ runs:
         CACHE_DIR="$HOME/.ccache"
         mkdir -p "$CACHE_DIR"
         
-        # ✅ 8GB shared cache (increased from 3GB)
+        # ✅ 8GB shared cache
         {
           echo "CCACHE_DIR=$CACHE_DIR"
           echo "CCACHE_MAXSIZE=8G"
@@ -492,27 +491,24 @@ runs:
           echo "CCACHE_IGNOREOPTIONS=--sysroot*"
         } >> "$GITHUB_ENV"
         
+        # Core settings (always supported)
         ccache -M 8G
         ccache -o compression=true
-        ccache -o compression_level=6  # ✅ Balanced compression (was 9)
+        ccache -o compression_level=6
         ccache -o direct_mode=true
         ccache -o hash_dir=false
-        ccache -o file_clone=true || true
-        ccache -o inode_cache=true || true
         ccache -o umask=002
+        ccache -o max_files=0
         
-        # ✅ MAXIMUM sloppiness for cross-model reuse
+        # ✅ Maximum sloppiness for cross-model reuse
         ccache -o sloppiness=file_macro,time_macros,include_file_mtime,include_file_ctime,pch_defines,system_headers,locale,clang_index_store,modules
         
-        # ✅ Aggressive eviction to stay under limit
-        ccache -o max_files=0  # No file limit, only size
-        ccache -o limit_multiple=0.95  # Start cleanup at 95%
+        # ✅ Advanced features (optional, fail silently)
+        ccache -o file_clone=true 2>/dev/null || true
+        ccache -o inode_cache=true 2>/dev/null || true
+        ccache -o depend_mode=true 2>/dev/null || true
         
-        # ✅ Enable depend_mode if supported
-        if ccache --help 2>&1 | grep -q 'depend_mode'; then
-          ccache -o depend_mode=true
-        fi
-        
+        # Clean build mode
         if [ "${{ inputs.clean }}" = "true" ]; then
           echo "CCACHE_DISABLE=1" >> "$GITHUB_ENV"
           echo "⚠️ Clean build mode - ccache disabled"
@@ -520,9 +516,13 @@ runs:
           echo "✅ ccache enabled (8G shared across 27 models)"
         fi
         
+        # Display active configuration
+        echo ""
+        echo "Active ccache settings:"
+        ccache -p | grep -E '(max_size|compression|sloppiness|max_files|direct_mode)' || true
+        
         echo "::endgroup::"
-
-    # ✅ OPTIMIZATION 1: Stable cache key without run_number
+    
     - name: Cache ccache (shared)
       uses: actions/cache@v4
       with:
