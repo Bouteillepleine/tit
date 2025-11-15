@@ -16,6 +16,7 @@ on:
         type: choice
         options:
           - ALL
+          - android16-6.12      # ✨ AJOUTÉ
           - android15-6.6
           - android14-6.1
           - android14-5.15
@@ -463,6 +464,7 @@ jobs:
           - 🔧 **BBG LSM** - Baseband Guard security module (optional)
           - 🚀 **Compiler Optimizations** - O2/O3 optimizations with LTO
           - 🎯 **Multiple Hook Types** - kprobe, manual, or tracepoint
+          - 📱 **Android 16 Support** - Full support for Android 16 (kernel 6.12)
           
           ## 🔧 Build Configuration
           - **Hook Type:** ${HOOK_TYPE}
@@ -482,6 +484,7 @@ jobs:
           ## ⚠️ Important Notes
           - Always backup your data before flashing
           - Check device compatibility before flashing
+          - Android 16 (6.12) kernels are experimental - test thoroughly
           
           ## 🔗 Useful Links
           - [SUSFS Module](https://github.com/sidex15/ksu_module_susfs)
