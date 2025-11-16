@@ -732,21 +732,42 @@ runs:
         TKERNEL_VERSION="${{ env.TKERNEL_VER }}"
         TRUSTY_EXISTS="false"
         
-        if [[ "$KERNEL_VERSION" == "6.6" ]]; then
+        # ✨ AJOUT: Support android16-6.12
+        if [[ "$KERNEL_VERSION" == "6.6" ]] || [[ "$KERNEL_VERSION" == "6.12" ]]; then
           if [ -f "$GITHUB_WORKSPACE/$CONFIG/.repo/manifests_fallback/$OP_MANIFEST" ]; then
             if grep -q 'common-modules/trusty' "$GITHUB_WORKSPACE/$CONFIG/.repo/manifests_fallback/$OP_MANIFEST" 2>/dev/null; then
               TRUSTY_EXISTS="true"
             fi
           fi
           
-          if [[ "$TRUSTY_EXISTS" == "false" && "$(printf '%s\n' "$TKERNEL_VERSION" "6.6.30" | sort -V | head -n1)" = "$TKERNEL_VERSION" ]]; then
-            echo "Fixing SUSFS for 6.6 without Trusty OS..."
-            sed -i 's/-32,12 +32,38/-32,11 +32,37/g' "$SUSFS_PATCH"
-            sed -i '/#include <trace\/hooks\/fs.h>/d' "$SUSFS_PATCH"
+          # ✨ AJOUT: Condition pour 6.12
+          if [[ "$KERNEL_VERSION" == "6.12" ]]; then
+            if [[ "$TRUSTY_EXISTS" == "false" && "$(printf '%s\n' "$TKERNEL_VERSION" "6.12.0" | sort -V | head -n1)" = "$TKERNEL_VERSION" ]]; then
+              echo "Fixing SUSFS for 6.12 without Trusty OS..."
+              sed -i 's/-32,12 +32,38/-32,11 +32,37/g' "$SUSFS_PATCH"
+              sed -i '/#include <trace\/hooks\/fs.h>/d' "$SUSFS_PATCH"
+            fi
+          elif [[ "$KERNEL_VERSION" == "6.6" ]]; then
+            if [[ "$TRUSTY_EXISTS" == "false" && "$(printf '%s\n' "$TKERNEL_VERSION" "6.6.30" | sort -V | head -n1)" = "$TKERNEL_VERSION" ]]; then
+              echo "Fixing SUSFS for 6.6 without Trusty OS..."
+              sed -i 's/-32,12 +32,38/-32,11 +32,37/g' "$SUSFS_PATCH"
+              sed -i '/#include <trace\/hooks\/fs.h>/d' "$SUSFS_PATCH"
+            fi
           fi
         fi
         
         fake_patched=0
+        
+        # ✨ AJOUT: Fake patch pour android16-6.12
+        if [ "$GKI_V" = "android16-6.12" ]; then
+          if ! grep -qxF $'\tunsigned int nr_subpages = __PAGE_SIZE / PAGE_SIZE;' ./fs/proc/task_mmu.c; then
+            echo "Applying fake patch for android16-6.12"
+            sed -i -e '/int ret = 0, copied = 0;/a \\tunsigned int nr_subpages \= __PAGE_SIZE \/ PAGE_SIZE;' \
+                   -e '/int ret = 0, copied = 0;/a \\tpagemap_entry_t \*res = NULL;' ./fs/proc/task_mmu.c
+            fake_patched=1
+          fi
+        fi
+        
         if [ "$GKI_V" = "android15-6.6" ]; then
           if ! grep -qxF $'\tunsigned int nr_subpages = __PAGE_SIZE / PAGE_SIZE;' ./fs/proc/task_mmu.c; then
             echo "Applying fake patch for android15-6.6"
@@ -772,6 +793,16 @@ runs:
         
         if [ "$fake_patched" = 1 ]; then
           echo "Reverting fake patches..."
+          
+          # ✨ AJOUT: Revert pour android16-6.12
+          if [ "$GKI_V" = "android16-6.12" ]; then
+            if grep -qxF $'\tunsigned int nr_subpages = __PAGE_SIZE / PAGE_SIZE;' ./fs/proc/task_mmu.c; then
+              echo "Reverting fake patch for android16-6.12"
+              sed -i -e '/unsigned int nr_subpages \= __PAGE_SIZE \/ PAGE_SIZE;/d' \
+                     -e '/pagemap_entry_t \*res = NULL;/d' ./fs/proc/task_mmu.c
+            fi
+          fi
+          
           if [ "$GKI_V" = "android15-6.6" ]; then
             if grep -qxF $'\tunsigned int nr_subpages = __PAGE_SIZE / PAGE_SIZE;' ./fs/proc/task_mmu.c; then
               sed -i -e '/unsigned int nr_subpages \= __PAGE_SIZE \/ PAGE_SIZE;/d' \
@@ -1430,6 +1461,10 @@ runs:
             ;;
           6.6)
             download_url="$ZRAM_BASE_URL/zram-${ANDROID_VER}-6.6.tar.gz"
+            ;;
+          6.12)
+            # ✨ AJOUT: Support ZRAM pour 6.12
+            download_url="$ZRAM_BASE_URL/zram-${ANDROID_VER}-6.12.tar.gz"
             ;;
           *)
             echo "::warning::ZRAM module not available for kernel $KERNEL_VER"
