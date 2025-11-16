@@ -24,7 +24,7 @@ on:
           - android12-5.10
           - OP13-CPH
           - OP13-PJZ
-          - OP13_OOS16-CPH
+          - OP13-OOS16
           - OP13r
           - OP13S
           - OP13T
