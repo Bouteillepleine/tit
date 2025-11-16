@@ -5,5 +5,5 @@
   "manifest": "oneplus_13_b.xml",
   "android_version": "android15",
   "kernel_version": "6.6",
-  "hmbird": true
+  "hmbird": false
 }
