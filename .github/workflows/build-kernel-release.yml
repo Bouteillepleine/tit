@@ -110,20 +110,35 @@ jobs:
           input="${{ inputs.op_model }}"
           echo "📋 Filter: $input"
           
+          # 🔍 Improved filtering logic
           if [[ "$input" == "ALL" ]]; then
             filter="."
           elif [[ "$input" == android*-* ]]; then
+            # Extract android version and kernel version
             av="${input%-*}"
             kv="${input#*-}"
             filter="map(select(.android_version==\"$av\" and .kernel_version==\"$kv\"))"
           else
-            filter="map(select(.model==\"$input\"))"
+            # 🆕 Flexible matching: try exact model first, then partial match
+            filter="map(select(
+              .model == \"$input\" or
+              (.model | startswith(\"$input\")) or
+              (.model | contains(\"$input\"))
+            ))"
           fi
           
           result=$(jq -c "$filter" matrix.json)
           count=$(jq 'length' <<<"$result")
           
-          [ "$count" -eq 0 ] && { echo "::error::No matching devices"; exit 1; }
+          if [ "$count" -eq 0 ]; then
+            echo "::error::No matching devices for filter: $input"
+            echo ""
+            echo "📋 Available devices in configs:"
+            jq -r '.[] | "  - \(.model) (\(.android_version)-\(.kernel_version))"' matrix.json | sort
+            echo ""
+            echo "💡 Tip: Use exact model name or 'ALL' to build everything"
+            exit 1
+          fi
           
           echo "✅ Found $count device(s) to build"
           echo ""
