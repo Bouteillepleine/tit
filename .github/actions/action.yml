@@ -91,7 +91,7 @@ runs:
         set -euo pipefail
         echo "::group::Validate inputs"
         
-        # ✅ FIX: Read from environment after parsing
+        # ✅ FIX: Read from environment with default values
         model="${OP_MODEL:-}"
         soc="${OP_SOC:-}"
         branch="${OP_BRANCH:-}"
@@ -99,12 +99,15 @@ runs:
         android_version="${OP_ANDROID_VERSION:-}"
         kernel_version="${OP_KERNEL_VERSION:-}"
         os_version="${OP_OS_VERSION:-}"
-        hmbird="${OP_HMBIRD:-}"
-        susfs="${OP_SUSFS:-}"
-        bbg="${OP_BBG:-}"
-        bbr="${OP_BBR:-}"
-        ttl="${OP_TTL:-}"
-        ip_set="${OP_IP_SET:-}"
+        
+        # ✅ FIX: Optional boolean fields with defaults
+        hmbird="${OP_HMBIRD:-false}"
+        susfs="${OP_SUSFS:-true}"
+        bbg="${OP_BBG:-false}"
+        bbr="${OP_BBR:-true}"
+        ttl="${OP_TTL:-true}"
+        ip_set="${OP_IP_SET:-true}"
+        
         optimize='${{ inputs.optimize_level }}'
         
         errors=()
@@ -160,14 +163,17 @@ runs:
           errors+=("Input 'kernel_version' must be 'X.Y' format. Got: '$kernel_version'")
         fi
         
-        # OS version validation
-        if [[ -z "$os_version" ]]; then
-          errors+=("Input 'os_version' cannot be empty")
-        elif [[ ! "$os_version" =~ ^OOS ]]; then
-          errors+=("Input 'os_version' must start with 'OOS'. Got: '$os_version'")
+        # ✅ FIX: OS version is now optional (for generic builds)
+        if [[ -n "$os_version" ]]; then
+          if [[ ! "$os_version" =~ ^OOS ]]; then
+            errors+=("Input 'os_version' must start with 'OOS' or be empty. Got: '$os_version'")
+          fi
+        else
+          echo "ℹ️  os_version not provided - using generic naming"
+          os_version="Generic"
         fi
         
-        # Boolean validations
+        # ✅ FIX: Boolean validations with proper defaults
         for var in hmbird susfs bbg bbr ttl ip_set; do
           val="${!var}"
           if [[ "$val" != "true" && "$val" != "false" ]]; then
@@ -190,7 +196,37 @@ runs:
           exit 1
         fi
         
+        # ✅ Export validated values back to environment
+        {
+          echo "OP_OS_VERSION=$os_version"
+          echo "OP_HMBIRD=$hmbird"
+          echo "OP_SUSFS=$susfs"
+          echo "OP_BBG=$bbg"
+          echo "OP_BBR=$bbr"
+          echo "OP_TTL=$ttl"
+          echo "OP_IP_SET=$ip_set"
+        } >> "$GITHUB_ENV"
+        
+        echo ""
         echo "✅ All inputs validated successfully"
+        echo ""
+        echo "📋 Configuration Summary:"
+        echo "   Model: $model"
+        echo "   SoC: $soc"
+        echo "   Branch: $branch"
+        echo "   Android: $android_version"
+        echo "   Kernel: $kernel_version"
+        echo "   OS Version: $os_version"
+        echo ""
+        echo "🔧 Feature Flags:"
+        echo "   SUSFS: $susfs"
+        echo "   HMBIRD: $hmbird"
+        echo "   BBG (LSM): $bbg"
+        echo "   BBR: $bbr"
+        echo "   TTL: $ttl"
+        echo "   IP_SET: $ip_set"
+        echo "   Optimization: $optimize"
+        
         echo "::endgroup::"
 
     - name: Install Minimal Dependencies
