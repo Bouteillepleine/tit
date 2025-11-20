@@ -69,6 +69,12 @@ outputs:
   errors_count:
     description: 'Number of build errors parsed from log'
     value: ${{ steps.collect_stats.outputs.errors_count }}
+  kpm_patched:
+    description: 'Whether KPM patch was applied'
+    value: ${{ env.KPM_PATCHED }}
+  kpm_image_sha256:
+    description: 'SHA256 of KPM-patched Image'
+    value: ${{ env.KPM_IMAGE_SHA256 }}
 
 runs:
   using: 'composite'
@@ -261,7 +267,6 @@ runs:
         echo "CONFIG=$CONFIG" >> "$GITHUB_ENV"
         echo "📁 Configuration directory: $CONFIG"
         
-        # ⚡ OPTIMIZATION: Network hardening
         {
           echo "GIT_TERMINAL_PROMPT=0"
           echo "GIT_HTTP_LOW_SPEED_LIMIT=1000"
@@ -293,7 +298,6 @@ runs:
         set -euo pipefail
         echo "::group::System resources"
         
-        # ⚡ OPTIMIZATION: Calculate memory for job limiting
         MEM_GB=$(awk '/MemTotal/ {printf "%.0f", $2/1024/1024}' /proc/meminfo)
         echo "MEM_GB=$MEM_GB" >> "$GITHUB_ENV"
         
@@ -568,7 +572,6 @@ runs:
         export CCACHE_DIR="$HOME/.ccache"
         mkdir -p "$CCACHE_DIR"
         
-        # ⚡ OPTIMIZATION: Dynamic cache size based on available disk
         FREE_GB="${FREE_GB:-0}"
         if [ "$FREE_GB" -ge 40 ]; then
           CCACHE_MAXSIZE="5G"
@@ -582,7 +585,6 @@ runs:
         
         ccache -M "$CCACHE_MAXSIZE"
         
-        # ⚡ OPTIMIZATION: Advanced ccache configuration
         ccache -o compression=true
         ccache -o compression_level=5
         ccache -o max_files=0
@@ -592,7 +594,6 @@ runs:
         ccache -o inode_cache=true || true
         ccache -o umask=002
         
-        # ⚡ OPTIMIZATION: Clang-specific sloppiness
         ccache -o sloppiness=file_macro,time_macros,include_file_mtime,include_file_ctime,pch_defines,system_headers,locale,clang_index_store,clang_index_store_skip_hmap
         
         if ccache --help 2>&1 | grep -q 'readonly_direct'; then
@@ -1087,7 +1088,6 @@ runs:
         cd "$CONFIG/kernel_platform"
         CONFIG_FILE=./common/arch/arm64/configs/gki_defconfig
         
-        # ⚡ OPTIMIZATION: Track defconfig changes to skip regeneration
         CFG_HASH_BEFORE="$(sha256sum "$CONFIG_FILE" 2>/dev/null | awk '{print $1}' || echo 'none')"
         
         cat >> "$CONFIG_FILE" << 'EOF'
@@ -1251,9 +1251,7 @@ runs:
         
         if [ "${{ inputs.enable_zram }}" = "true" ]; then
           
-        cat >> "$CONFIG_FILE" << 'EOF'
-        
-        # ZRAM Advanced Compressors
+        cat >> "$CONFIG_FILE" << 'EOF'        # ZRAM Advanced Compressors
         CONFIG_CRYPTO_LZ4HC=y
         CONFIG_CRYPTO_LZ4K=y
         CONFIG_CRYPTO_LZ4KD=y
@@ -1282,7 +1280,6 @@ runs:
         OUT=out
         mkdir -p "$OUT"
         
-        # ⚡ OPTIMIZATION: Skip gki_defconfig if unchanged
         if [ "$REGEN_DEFCONFIG" -eq 1 ] || [ ! -f "$OUT/.config" ]; then
           echo "Generating .config from gki_defconfig..."
           make O="$OUT" gki_defconfig
@@ -1294,6 +1291,7 @@ runs:
         echo "✅ Kernel configured successfully"
         echo "   Configuration summary:"
         echo "   - SUSFS: 2.0.0 (auto-hook)"
+        echo "   - KPM: enabled"
         echo "   - Optimization: ${{ inputs.optimize_level }}"
         echo "   - ZRAM: ${{ inputs.enable_zram }}"
         echo "   - LSM (BBG): $ENABLE_LSM"
@@ -1328,7 +1326,6 @@ runs:
         if [ -f "$F2FS_SYSFS" ] && grep -q "seqzone_switch" "$F2FS_SYSFS" 2>/dev/null; then
           echo "🔧 Patching F2FS sysfs.c..."
           
-          # Replace the problematic function
           sed -i 's/return sysfs_emit(buf, seqzone_switch);/return sysfs_emit(buf, "supported\\n");/g' "$F2FS_SYSFS"
           sed -i '/if (!seqzone_switch)/d' "$F2FS_SYSFS"
           sed -i '/return 0;$/d' "$F2FS_SYSFS"
@@ -1337,6 +1334,54 @@ runs:
         else
           echo "ℹ️  No F2FS patch needed"
         fi
+        
+        echo "::endgroup::"
+
+    - name: 🔧 Patch KernelSU with Python
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "::group::Patch KernelSU"
+        
+        KERNEL_PATH="$GITHUB_WORKSPACE/$CONFIG/kernel_platform"
+        COMMON="$KERNEL_PATH/common"
+        
+        python3 << 'EOF'
+        import os
+        import re
+        
+        kernel_path = os.environ.get('GITHUB_WORKSPACE') + '/' + os.environ.get('CONFIG') + '/kernel_platform'
+        common = kernel_path + '/common'
+        supercalls = common + '/drivers/kernelsu/supercalls.c'
+        
+        if not os.path.exists(supercalls):
+            print("ℹ️  KernelSU supercalls.c not found")
+            exit(0)
+        
+        print("🔧 Patching KernelSU supercalls.c...")
+        
+        with open(supercalls, 'r') as f:
+            content = f.read()
+        
+        defines = '''
+        // Missing defines for SukiSU Ultra
+        #ifndef DATA_ADB_NO_AUTO_ADD_SUS_BIND_MOUNT
+        #define DATA_ADB_NO_AUTO_ADD_SUS_BIND_MOUNT "/data/adb/.no_auto_add_sus_bind_mount"
+        #endif
+        
+        #ifndef DATA_ADB_NO_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT
+        #define DATA_ADB_NO_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT "/data/adb/.no_auto_add_sus_ksu_default_mount"
+        #endif
+        
+        '''
+        
+        content = re.sub(r'(#include\s+[<"][^>"]+[>"])', r'\1' + defines, content, count=1)
+        
+        with open(supercalls, 'w') as f:
+            f.write(content)
+        
+        print("✅ KernelSU patched successfully")
+        EOF
         
         echo "::endgroup::"
 
@@ -1355,7 +1400,6 @@ runs:
         
         export PYTHONWARNINGS="${PYTHONWARNINGS}"
         
-        # ⚡ OPTIMIZATION: Reproducible builds with fixed timestamps
         COMMIT_TIMESTAMP=$(git log -1 --format=%ct 2>/dev/null || echo "$(date +%s)")
         COMMIT_DATE=$(git log -1 --format=%cd --date=format:'%Y-%m-%d %H:%M:%S' 2>/dev/null || date -u '+%Y-%m-%d %H:%M:%S')
         COMMIT_HASH=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
@@ -1366,7 +1410,6 @@ runs:
         export KBUILD_BUILD_HOST="${BUILD_HOST:-github-actions}"
         export KBUILD_BUILD_VERSION=1
         
-        # ⚡ OPTIMIZATION: Lock .scmversion timestamp
         touch -d "@$COMMIT_TIMESTAMP" "$COMMON/.scmversion" 2>/dev/null || true
         
         export PATH="/usr/lib/ccache:${CLANG_BIN_PATH}:${PATH}"
@@ -1412,7 +1455,6 @@ runs:
         OUT=out
         mkdir -p "$OUT"
         
-        # ⚡ OPTIMIZATION: RAM-capped parallel jobs
         MEM_GB="${MEM_GB:-0}"
         NPROC=$(nproc --all)
         JOBS=$((NPROC + 2))
@@ -1443,7 +1485,6 @@ runs:
         fi
         echo "============================================"
         
-        # ⚡ OPTIMIZATION: Skip gki_defconfig if .config exists and defconfig unchanged
         if [ ! -f "$OUT/.config" ]; then
           echo "🔨 Generating initial .config from gki_defconfig..."
           make O="$OUT" gki_defconfig
@@ -1471,7 +1512,6 @@ runs:
           scripts/config --file "$OUT/.config" -d "$sym" || true
         done
         
-        # ⚡ FIX: Disable KVM to avoid RELA type 311 error with Clang
         echo "🔧 Disabling KVM (not needed for OnePlus devices)..."
         scripts/config --file "$OUT/.config" -d CONFIG_KVM || true
         scripts/config --file "$OUT/.config" -d CONFIG_VIRTUALIZATION || true
@@ -1479,7 +1519,6 @@ runs:
         scripts/config --file "$OUT/.config" -d CONFIG_VHOST_NET || true
         scripts/config --file "$OUT/.config" -d CONFIG_VHOST_CROSS_ENDIAN_LEGACY || true
         
-        # ⚡ OPTIMIZATION: -fno-plt for better performance
         if [ "${{ inputs.optimize_level }}" = "O3" ]; then
           scripts/config --file "$OUT/.config" -d CC_OPTIMIZE_FOR_PERFORMANCE
           scripts/config --file "$OUT/.config" -e CC_OPTIMIZE_FOR_PERFORMANCE_O3
@@ -1493,7 +1532,6 @@ runs:
         scripts/config --file "$OUT/.config" -e LTO_CLANG_THIN
         scripts/config --file "$OUT/.config" -e LTO_CLANG
         
-        # ⚡ OPTIMIZATION: Always use olddefconfig (fast) to apply scripts/config changes
         echo "🔄 Applying configuration changes with olddefconfig..."
         make O="$OUT" olddefconfig
         
@@ -1503,7 +1541,6 @@ runs:
         BUILD_START=$(date +%s)
         set -o pipefail
         
-        # ⚡ OPTIMIZATION: Non-blocking log output
         if ! stdbuf -oL -eL make -j"$JOBS" O="$OUT" KCFLAGS="$KCFLAGS" KCPPFLAGS="$KCPPFLAGS" 2>&1 | tee build.log; then
           echo "::error::Kernel build failed"
           echo "::group::Last 100 lines of build log"
@@ -1593,7 +1630,7 @@ runs:
         if [ "$ORIGINAL_SHA256" = "$PATCHED_SHA256" ]; then
           echo "::warning::SHA256 unchanged - patch may not have been applied"
         else
-          echo "✅ Image successfully patched"
+          echo "✅ Image successfully patched with KPM"
         fi
         
         rm -f Image
@@ -1604,7 +1641,7 @@ runs:
         ANYKERNEL_DIR="$GITHUB_WORKSPACE/AnyKernel3"
         if [ -d "$ANYKERNEL_DIR" ]; then
           cp Image "$ANYKERNEL_DIR/Image"
-          echo "✅ Patched Image copied to AnyKernel3"
+          echo "✅ KPM-patched Image copied to AnyKernel3"
         fi
         
         echo "KPM_PATCHED=true" >> "$GITHUB_ENV"
@@ -1645,7 +1682,6 @@ runs:
         echo "   Hit Rate: ${HIT_RATE}%"
         echo "   Direct Rate: ${DIRECT_RATE}%"
         
-        # ⚡ OPTIMIZATION: Keep minimum 3G cache
         ccache -M 3G
         ccache --evict-older-than 7d || true
         
@@ -1754,7 +1790,6 @@ runs:
           
         success=0
         if [ -n "$download_url" ]; then
-          # ⚡ OPTIMIZATION: Use curl with retries instead of wget
           if curl -fSL --retry 5 --retry-delay 2 --connect-timeout 20 --max-time 600 \
                "$download_url" -o "${ARTIFACTS_DIR}/zram-module.tar.gz"; then
             if [ -f "${ARTIFACTS_DIR}/zram-module.tar.gz" ]; then
@@ -1796,13 +1831,43 @@ runs:
           exit 1
         fi
         
+        # ✅ Vérifier que l'Image est bien patchée avec KPM
+        if [ "${KPM_PATCHED:-false}" != "true" ]; then
+          echo "::warning::Image is NOT KPM-patched!"
+        else
+          echo "✅ Using KPM-patched Image"
+          echo "   SHA256: ${KPM_IMAGE_SHA256}"
+          
+          # ✅ Double vérification
+          CURRENT_SHA=$(sha256sum "$IMG" | awk '{print $1}')
+          if [ "$CURRENT_SHA" != "${KPM_IMAGE_SHA256}" ]; then
+            echo "::error::Image SHA256 mismatch!"
+            echo "  Expected: ${KPM_IMAGE_SHA256}"
+            echo "  Got: $CURRENT_SHA"
+            exit 1
+          fi
+        fi
+        
         if [ ! -d "$ANYKERNEL_DIR" ]; then
           echo "::error::AnyKernel3 directory not found"
           exit 1
         fi
         
         cd "$ANYKERNEL_DIR"
-        cp "$IMG" ./
+        
+        # ✅ Copier l'Image patchée
+        cp "$IMG" ./Image
+        
+        # ✅ Vérifier la copie
+        COPIED_SHA=$(sha256sum ./Image | awk '{print $1}')
+        echo "📦 Image copied to AnyKernel3:"
+        echo "   Size: $(stat -c%s ./Image | numfmt --to=iec-i --suffix=B)"
+        echo "   SHA256: $COPIED_SHA"
+        
+        if [ "${KPM_PATCHED:-false}" = "true" ] && [ "$COPIED_SHA" != "${KPM_IMAGE_SHA256}" ]; then
+          echo "::error::Copied Image SHA256 mismatch!"
+          exit 1
+        fi
         
         if [ "${{ inputs.enable_zram }}" = "true" ] && [ "${{ steps.zram_module.outputs.zram_available }}" = "true" ]; then
           echo "Including ZRAM modules..."
@@ -1825,7 +1890,6 @@ runs:
         
         ZIP_NAME="SukiSU-Ultra-${DEVICE_MODEL}-${KERNEL_VERSION}${SUFFIX}.zip"
         
-        # ⚡ OPTIMIZATION: Faster compression with level 6
         echo "Creating ZIP: $ZIP_NAME"
         echo "Compression: deflate (level 6 - optimized)"
         
@@ -1881,6 +1945,8 @@ runs:
           "android_version": "${ANDROID_VER}",
           "sukisu_version": "${SUKISUVER}",
           "susfs_version": "${SUSVER:-2.0.0}",
+          "kpm_patched": ${KPM_PATCHED:-false},
+          "kpm_image_sha256": "${KPM_IMAGE_SHA256:-none}",
           "clang_version": "${CLANG_VERSION_SHORT}",
           "build_date": "$(date -u '+%Y-%m-%d %H:%M:%S UTC')",
           "build_time_seconds": ${BUILD_TIME:-0},
@@ -1936,6 +2002,7 @@ runs:
         echo "|---------|-------|" >> $GITHUB_STEP_SUMMARY
         echo "| SukiSU Version | v${SUKISUVER:-unknown} |" >> $GITHUB_STEP_SUMMARY
         echo "| SUSFS Version | ${SUSVER:-2.0.0} |" >> $GITHUB_STEP_SUMMARY
+        echo "| KPM Patched | ${KPM_PATCHED:-false} |" >> $GITHUB_STEP_SUMMARY
         echo "| Clang | ${CLANG_VERSION_SHORT:-unknown} |" >> $GITHUB_STEP_SUMMARY
         echo "| Optimization | ${{ inputs.optimize_level }} with -fno-plt |" >> $GITHUB_STEP_SUMMARY
         echo "| Hook Type | Auto (SUSFS 2.0) |" >> $GITHUB_STEP_SUMMARY
@@ -1952,6 +2019,11 @@ runs:
           echo "| ZIP Size | ${{ steps.create_zip.outputs.zip_size_mb }} MB |" >> $GITHUB_STEP_SUMMARY
           echo "| ZIP SHA256 | \`${{ steps.create_zip.outputs.zip_sha256 }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| Image SHA256 | \`${{ steps.collect_stats.outputs.image_sha256 }}\` |" >> $GITHUB_STEP_SUMMARY
+          
+          if [ "${KPM_PATCHED:-false}" = "true" ]; then
+            echo "| KPM Image SHA256 | \`${KPM_IMAGE_SHA256:-unknown}\` |" >> $GITHUB_STEP_SUMMARY
+          fi
+          
           echo "" >> $GITHUB_STEP_SUMMARY
           
           if [ "${{ inputs.enable_zram }}" = "true" ]; then
@@ -2007,7 +2079,6 @@ runs:
         
         echo "" >> $GITHUB_STEP_SUMMARY
         
-        # ⚡ Add optimization summary
         echo "## ⚡ Performance Optimizations Applied" >> $GITHUB_STEP_SUMMARY
         echo "- 🚀 Dynamic ccache sizing (${CCACHE_MAXSIZE})" >> $GITHUB_STEP_SUMMARY
         echo "- 🧠 RAM-capped parallel jobs" >> $GITHUB_STEP_SUMMARY
@@ -2017,10 +2088,11 @@ runs:
         echo "- 📦 Fast ZIP compression (level 6)" >> $GITHUB_STEP_SUMMARY
         echo "- 🌐 Network hardening with retries" >> $GITHUB_STEP_SUMMARY
         echo "- 🔒 Reproducible builds (fixed timestamps)" >> $GITHUB_STEP_SUMMARY
+        echo "- 🔧 KPM patching for enhanced security" >> $GITHUB_STEP_SUMMARY
         
         echo "" >> $GITHUB_STEP_SUMMARY
         echo "---" >> $GITHUB_STEP_SUMMARY
-        echo "*Built with ❤️ by SukiSU Ultra Action v5 (SUSFS 2.0.0) - Performance Optimized*" >> $GITHUB_STEP_SUMMARY
+        echo "*Built with ❤️ by SukiSU Ultra Action v5 (SUSFS 2.0.0 + KPM) - Performance Optimized*" >> $GITHUB_STEP_SUMMARY
 
     - name: 📤 Upload kernel artifact
       if: success()
@@ -2031,3 +2103,5 @@ runs:
         retention-days: 30
         if-no-files-found: error
         compression-level: 6
+        
+        
