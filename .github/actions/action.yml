@@ -351,8 +351,8 @@ runs:
         
         CONFIG_DIR="$GITHUB_WORKSPACE/$CONFIG"
         
-        # ✅ Create and export ARTIFACTS_DIR globally
-        ARTIFACTS_DIR="$CONFIG_DIR/artifacts"
+        # ✅ FIX: Point to kernel_platform/artifacts (where files are actually created)
+        ARTIFACTS_DIR="$CONFIG_DIR/kernel_platform/artifacts"
         mkdir -p "$ARTIFACTS_DIR"
         echo "ARTIFACTS_DIR=$ARTIFACTS_DIR" >> "$GITHUB_ENV"
         
@@ -2165,5 +2165,7 @@ runs:
         retention-days: 30
         if-no-files-found: error
         compression-level: 6
+
+
 
 
