@@ -1191,7 +1191,7 @@ runs:
         PYTHONWARNINGS: "ignore:invalid escape sequence"
       run: |
         set -euo pipefail
-        echo "::group::Build kernel with verbose error reporting"
+        echo "::group::Build kernel with error capture"
         
         KERNEL_PATH="$GITHUB_WORKSPACE/$CONFIG/kernel_platform"
         COMMON="$KERNEL_PATH/common"
@@ -1308,24 +1308,24 @@ runs:
         BUILD_START=$(date +%s)
         set -o pipefail
         
-        # ✅ MODIFICATION : Activer verbose + capturer erreurs
-        echo "🔨 Starting kernel compilation with verbose output..."
+        # ✅ Build SANS verbose (V=1 retiré) mais avec capture d'erreur
+        echo "🔨 Starting kernel compilation..."
         if ! make -j"$(nproc --all)" O="$OUT" \
              KCFLAGS="$KCFLAGS" \
              KCPPFLAGS="$KCPPFLAGS" \
-             V=1 \
              2>&1 | tee build.log; then
           
           echo ""
           echo "::error::❌ Kernel build failed"
           echo ""
           
+          # Afficher les dernières lignes du log
           echo "::group::🔍 Last 300 lines of build log"
           tail -n 300 build.log || true
           echo "::endgroup::"
           
           echo ""
-          echo "::group::🔍 Searching for linking errors"
+          echo "::group::🔍 Detailed Error Analysis"
           
           echo "=== Undefined References ==="
           grep -i "undefined reference" build.log | tail -n 50 || echo "None found"
@@ -1346,12 +1346,15 @@ runs:
           echo "=== KernelSU/SUSFS Related Errors ==="
           grep -E "(kernelsu|susfs|ksu_)" build.log | grep -i "error" | tail -n 50 || echo "None found"
           
+          echo ""
+          echo "=== time64_to_tm Conflicts ==="
+          grep -i "time64_to_tm" build.log | tail -n 30 || echo "None found"
+          
           echo "::endgroup::"
           
           exit 1
         fi
         
-        # ✅ Reste du code inchangé...
         BUILD_END=$(date +%s)
         BUILD_TIME=$((BUILD_END - BUILD_START))
         
@@ -1361,7 +1364,7 @@ runs:
         
         IMG="$OUT/arch/arm64/boot/Image"
         if [ ! -f "$IMG" ]; then
-          echo "::error::Kernel Image missing"
+          echo "::error::Kernel Image missing after successful build"
           echo "::group::Last 100 lines of build log"
           tail -n 100 build.log || echo "Build log not available"
           echo "::endgroup::"
@@ -1369,6 +1372,16 @@ runs:
         fi
         
         IMG_SIZE=$(stat -c%s "$IMG")
+        
+        # Trim build log if too large
+        if [ -f build.log ]; then
+          LOG_SIZE=$(stat -c%s build.log)
+          if [ "$LOG_SIZE" -gt 8388608 ]; then
+            echo "⚠️ Build log is ${LOG_SIZE} bytes, trimming to last 8MB..."
+            tail -c 8388608 build.log > build.last8m.log
+            mv build.last8m.log build.log
+          fi
+        fi
         
         echo "============================================"
         echo "✅ Build Completed Successfully"
@@ -1383,153 +1396,6 @@ runs:
           ccache -s
         fi
         echo "============================================"
-        echo "::endgroup::"
-
-    - name: 🔧 Apply KPM patch_linux    
-      shell: bash
-      run: |
-        set -euo pipefail
-        echo "::group::Apply KPM patch_linux"
-        
-        KERNEL_PATH="$GITHUB_WORKSPACE/$CONFIG/kernel_platform"
-        PATCH_DIR="$GITHUB_WORKSPACE/SukiSU_patch/kpm"
-        COMMON_DIR="$KERNEL_PATH/common"
-        OUT_DIR="$COMMON_DIR/out"
-        
-        # Verify patch_linux exists
-        if [ ! -f "$PATCH_DIR/patch_linux" ]; then
-          echo "::error::patch_linux not found at: $PATCH_DIR/patch_linux"
-          echo "Available files in SukiSU_patch/kpm:"
-          ls -la "$PATCH_DIR/" || true
-          exit 1
-        fi
-        
-        # Create Final-Image-Find directory
-        FINAL_IMAGE_DIR="$OUT_DIR/Final-Image-Find"
-        mkdir -p "$FINAL_IMAGE_DIR"
-        
-        # Copy original Image
-        ORIGINAL_IMAGE="$OUT_DIR/arch/arm64/boot/Image"
-        if [ ! -f "$ORIGINAL_IMAGE" ]; then
-          echo "::error::Original kernel Image not found at: $ORIGINAL_IMAGE"
-          exit 1
-        fi
-        
-        echo "📋 Original Image info:"
-        ls -lh "$ORIGINAL_IMAGE"
-        ORIGINAL_SHA256=$(sha256sum "$ORIGINAL_IMAGE" | awk '{print $1}')
-        echo "   SHA256: $ORIGINAL_SHA256"
-        
-        # Copy patch_linux to Final-Image-Find
-        echo ""
-        echo "📦 Copying patch_linux to Final-Image-Find..."
-        cp "$PATCH_DIR/patch_linux" "$FINAL_IMAGE_DIR/"
-        
-        # Copy Image to Final-Image-Find
-        cp "$ORIGINAL_IMAGE" "$FINAL_IMAGE_DIR/"
-        
-        cd "$FINAL_IMAGE_DIR"
-        
-        # Make patch_linux executable
-        chmod +x patch_linux
-        
-        # Verify patch_linux is executable
-        if [ ! -x "./patch_linux" ]; then
-          echo "::error::patch_linux is not executable"
-          exit 1
-        fi
-        
-        echo ""
-        echo "🔨 Running patch_linux..."
-        echo "============================================"
-        
-        # Run patch_linux and capture output
-        if ./patch_linux 2>&1 | tee patch_linux.log; then
-          echo "============================================"
-          echo "✅ patch_linux executed successfully"
-        else
-          EXIT_CODE=$?
-          echo "============================================"
-          echo "::error::patch_linux failed with exit code: $EXIT_CODE"
-          echo ""
-          echo "::group::patch_linux output"
-          cat patch_linux.log || true
-          echo "::endgroup::"
-          exit $EXIT_CODE
-        fi
-        
-        # Verify oImage was created
-        if [ ! -f "oImage" ]; then
-          echo "::error::oImage was not created by patch_linux"
-          echo ""
-          echo "Files in Final-Image-Find:"
-          ls -la
-          exit 1
-        fi
-        
-        echo ""
-        echo "📊 Patched Image info:"
-        ls -lh oImage
-        PATCHED_SHA256=$(sha256sum oImage | awk '{print $1}')
-        echo "   SHA256: $PATCHED_SHA256"
-        
-        # Verify the images are different
-        if [ "$ORIGINAL_SHA256" = "$PATCHED_SHA256" ]; then
-          echo "::warning::Patched image has same SHA256 as original - patch may not have been applied"
-        else
-          echo "✅ Image successfully patched (SHA256 changed)"
-        fi
-        
-        # Remove original Image and rename oImage
-        echo ""
-        echo "🔄 Replacing original Image with patched version..."
-        rm -f Image
-        mv oImage Image
-        
-        # Copy patched Image back to build output
-        PATCHED_IMAGE="$OUT_DIR/arch/arm64/boot/Image"
-        cp Image "$PATCHED_IMAGE"
-        
-        # Verify copy
-        if [ ! -f "$PATCHED_IMAGE" ]; then
-          echo "::error::Failed to copy patched Image back to: $PATCHED_IMAGE"
-          exit 1
-        fi
-        
-        # Copy to AnyKernel3
-        ANYKERNEL_DIR="$GITHUB_WORKSPACE/AnyKernel3"
-        if [ -d "$ANYKERNEL_DIR" ]; then
-          echo ""
-          echo "📦 Copying patched Image to AnyKernel3..."
-          cp Image "$ANYKERNEL_DIR/Image"
-          
-          if [ -f "$ANYKERNEL_DIR/Image" ]; then
-            ANYKERNEL_SHA256=$(sha256sum "$ANYKERNEL_DIR/Image" | awk '{print $1}')
-            echo "✅ Image copied to AnyKernel3"
-            echo "   SHA256: $ANYKERNEL_SHA256"
-            
-            # Verify consistency
-            if [ "$PATCHED_SHA256" != "$ANYKERNEL_SHA256" ]; then
-              echo "::error::SHA256 mismatch between patched Image and AnyKernel3 copy"
-              exit 1
-            fi
-          else
-            echo "::error::Failed to copy Image to AnyKernel3"
-            exit 1
-          fi
-        else
-          echo "::warning::AnyKernel3 directory not found, skipping copy"
-        fi
-        
-        # Save patched image info to environment
-        echo "KPM_PATCHED=true" >> "$GITHUB_ENV"
-        echo "KPM_IMAGE_SHA256=$PATCHED_SHA256" >> "$GITHUB_ENV"
-        
-        echo ""
-        echo "✅ KPM patch_linux completed successfully"
-        echo "   Original SHA256: $ORIGINAL_SHA256"
-        echo "   Patched SHA256:  $PATCHED_SHA256"
-        
         echo "::endgroup::"
 
     - name: ccache Statistics
