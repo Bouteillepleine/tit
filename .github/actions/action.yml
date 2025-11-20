@@ -486,7 +486,8 @@ runs:
         ANYKERNEL_BRANCH="gki-2.0"
         echo "Cloning AnyKernel3 (branch: $ANYKERNEL_BRANCH)..."
         git clone --depth=1 https://github.com/Bouteillepleine/AnyKernel3.git -b "$ANYKERNEL_BRANCH"
-        echo "✅ AnyKernel3 cloned"
+        git clone --depth=1 https://github.com/TheWildJames/kernel_patches.git &
+        echo "✅ AnyKernel3 & kernel patches cloned"
         echo "::endgroup::"
 
     - name: Clean Up ABI Protected Exports
@@ -856,6 +857,30 @@ runs:
         fi
         echo "::endgroup::"
 
+    - name: Apply Other Patches
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "::group::Apply Other Patches"
+        cd "$CONFIG/kernel_platform/common"
+        
+        # ✅ AJOUT : Définir les variables manquantes
+        KERNEL_VERSION="${{ env.KERNEL_VER }}"
+        MIN_VERSION="6.6"  # ou la version minimale requise
+        
+        patch -p1 --forward "../../../kernel_patches/common/optimized_mem_operations.patch"
+        patch -p1 --forward "../../../kernel_patches/common/file_struct_8bytes_align.patch"
+        patch -p1 --forward "../../../kernel_patches/common/reduce_cache_pressure.patch"
+        
+        if [ "$(printf '%s\n' "$KERNEL_VERSION" "$MIN_VERSION" | sort -V | head -n1)" = "$KERNEL_VERSION" ]; then
+          patch -p1 --forward "../../../kernel_patches/common/clear_page_16bytes_align.patch"
+        else
+          cat "../../../kernel_patches/common/clear_page_16bytes_align.patch" | \
+            sed -e 's/SYM_FUNC_START_PI(clear_page)/SYM_FUNC_START_PI(__pi_clear_page)/' | \
+            patch -p1 -F3 --forward
+        fi
+        echo "::endgroup::"
+
     - name: Apply ZRAM Patches
       if: ${{ inputs.enable_zram == 'true' }}
       shell: bash
@@ -1139,7 +1164,26 @@ runs:
         mkdir -p out
         CUSTOM_LOCALVERSION="-${{ env.ANDROID_VER }}-OP-UltraBolt"
         echo "CUSTOM_LOCALVERSION=$CUSTOM_LOCALVERSION" >> "$GITHUB_ENV"
-        echo "Kernel branding: $CUSTOM_LOCALVERSION"    
+        echo "Kernel branding: $CUSTOM_LOCALVERSION"
+
+    - name: Enable KPM Module
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "::group::Enable KPM"
+        cd "$CONFIG/kernel_platform/KernelSU"
+        
+        # Vérifier si KPM existe
+        if [ ! -d "kernel/kpm" ]; then
+          echo "::error::KPM directory not found"
+          exit 1
+        fi
+        
+        # Forcer l'activation dans le Makefile
+        sed -i 's/CONFIG_KPM := n/CONFIG_KPM := y/' kernel/Makefile || true
+        
+        echo "✅ KPM enabled"
+        echo "::endgroup::"
 
     - name: Build Kernel
       shell: bash
@@ -1147,7 +1191,7 @@ runs:
         PYTHONWARNINGS: "ignore:invalid escape sequence"
       run: |
         set -euo pipefail
-        echo "::group::Build kernel with ccache optimization"
+        echo "::group::Build kernel with verbose error reporting"
         
         KERNEL_PATH="$GITHUB_WORKSPACE/$CONFIG/kernel_platform"
         COMMON="$KERNEL_PATH/common"
@@ -1264,17 +1308,50 @@ runs:
         BUILD_START=$(date +%s)
         set -o pipefail
         
-        make -j"$(nproc --all)" O="$OUT" KCFLAGS="$KCFLAGS" KCPPFLAGS="$KCPPFLAGS" 2>&1 | tee build.log
-        
-        if [ -f build.log ]; then
-          LOG_SIZE=$(stat -c%s build.log)
-          if [ "$LOG_SIZE" -gt 8388608 ]; then
-            echo "⚠️ Build log is ${LOG_SIZE} bytes, trimming to last 8MB..."
-            tail -c 8388608 build.log > build.last8m.log
-            mv build.last8m.log build.log
-          fi
+        # ✅ MODIFICATION : Activer verbose + capturer erreurs
+        echo "🔨 Starting kernel compilation with verbose output..."
+        if ! make -j"$(nproc --all)" O="$OUT" \
+             KCFLAGS="$KCFLAGS" \
+             KCPPFLAGS="$KCPPFLAGS" \
+             V=1 \
+             2>&1 | tee build.log; then
+          
+          echo ""
+          echo "::error::❌ Kernel build failed"
+          echo ""
+          
+          echo "::group::🔍 Last 300 lines of build log"
+          tail -n 300 build.log || true
+          echo "::endgroup::"
+          
+          echo ""
+          echo "::group::🔍 Searching for linking errors"
+          
+          echo "=== Undefined References ==="
+          grep -i "undefined reference" build.log | tail -n 50 || echo "None found"
+          
+          echo ""
+          echo "=== Multiple Definitions ==="
+          grep -i "multiple definition" build.log | tail -n 50 || echo "None found"
+          
+          echo ""
+          echo "=== Linker Errors ==="
+          grep -i "ld.lld:" build.log | tail -n 50 || echo "None found"
+          
+          echo ""
+          echo "=== Generic Errors ==="
+          grep -i "error:" build.log | grep -v "warning:" | tail -n 100 || echo "None found"
+          
+          echo ""
+          echo "=== KernelSU/SUSFS Related Errors ==="
+          grep -E "(kernelsu|susfs|ksu_)" build.log | grep -i "error" | tail -n 50 || echo "None found"
+          
+          echo "::endgroup::"
+          
+          exit 1
         fi
         
+        # ✅ Reste du code inchangé...
         BUILD_END=$(date +%s)
         BUILD_TIME=$((BUILD_END - BUILD_START))
         
